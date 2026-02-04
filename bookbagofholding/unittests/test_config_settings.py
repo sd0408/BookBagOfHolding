@@ -85,7 +85,6 @@ class TestSearchSettings(unittest.TestCase):
         """SearchSettings should have correct defaults."""
         settings = SearchSettings()
         self.assertEqual(settings.book_interval, 360)
-        self.assertEqual(settings.mag_interval, 360)
         self.assertEqual(settings.match_ratio, 80)
         self.assertEqual(settings.dload_ratio, 90)
 
@@ -98,7 +97,6 @@ class TestPostProcessSettings(unittest.TestCase):
         settings = PostProcessSettings()
         self.assertEqual(settings.ebook_dest_folder, '$Author/$Title')
         self.assertEqual(settings.ebook_dest_file, '$Title - $Author')
-        self.assertEqual(settings.mag_dest_folder, '_Magazines/$Title/$IssueDate')
 
 
 class TestFileTypeSettings(unittest.TestCase):

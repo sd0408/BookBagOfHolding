@@ -14,6 +14,7 @@
 #  along with Bookbag of Holding.  If not, see <http://www.gnu.org/licenses/>.
 
 import datetime
+import html
 import os
 import platform
 import shutil
@@ -579,6 +580,8 @@ def processDir(reset=False, startdir=None, ignoreclient=False):
                     book_type = bookType(book)
                     # remove accents and convert not-ascii apostrophes
                     matchtitle = unaccented_str(book['NZBtitle'])
+                    # Decode HTML entities (e.g., &amp; -> &) for consistent matching
+                    matchtitle = html.unescape(matchtitle)
                     # torrent names might have words_separated_by_underscores
                     matchtitle = matchtitle.split(' LL.(')[0].replace('_', ' ')
                     # strip noise characters
@@ -598,6 +601,8 @@ def processDir(reset=False, startdir=None, ignoreclient=False):
                             # so we try to do a "best match" on the name, there might be a better way...
 
                             matchname = unaccented_str(fname)
+                            # Decode HTML entities (e.g., &amp; -> &) from folder names
+                            matchname = html.unescape(matchname)
                             matchname = matchname.split(' LL.(')[0].replace('_', ' ')
                             matchname = replace_all(matchname, __dic__)
                             match = fuzz.token_set_ratio(matchtitle, matchname)

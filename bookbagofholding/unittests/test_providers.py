@@ -37,7 +37,6 @@ def provider_config():
 
     bookbagofholding.CONFIG['EBOOK_TYPE'] = 'epub, mobi, pdf'
     bookbagofholding.CONFIG['AUDIOBOOK_TYPE'] = 'mp3, m4b'
-    bookbagofholding.CONFIG['MAG_TYPE'] = 'pdf'
     bookbagofholding.CONFIG['HTTP_TIMEOUT'] = '30'
 
     yield

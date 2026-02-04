@@ -47,7 +47,6 @@ def postprocess_config():
 
     bookbagofholding.CONFIG['EBOOK_TYPE'] = 'epub, mobi, pdf'
     bookbagofholding.CONFIG['AUDIOBOOK_TYPE'] = 'mp3, m4b'
-    bookbagofholding.CONFIG['MAG_TYPE'] = 'pdf'
     bookbagofholding.CONFIG['DESTINATION_COPY'] = False
     bookbagofholding.CONFIG['BLACKLIST_FAILED'] = False  # Default to False for tests
     bookbagofholding.CONFIG['REJECT_WORDS'] = 'audiobook, mp3'
@@ -1242,3 +1241,116 @@ class TestFailUnsupportedFiletypeCleanup:
                 shutil.rmtree(test_dir)
             if os.path.exists(fail_path):
                 shutil.rmtree(fail_path)
+
+
+class TestHtmlEntityHandling:
+    """Tests for HTML entity decoding in folder name matching.
+
+    Some download clients (e.g., SABnzbd) may create folder names with HTML entities
+    like '&amp;' instead of '&'. These tests verify that such entities are properly
+    decoded before fuzzy matching.
+    """
+
+    def test_html_unescape_ampersand(self):
+        """html.unescape should convert &amp; to &."""
+        import html
+        folder_name = "Dan Simmons Hyperion &amp; Endymion Band"
+        decoded = html.unescape(folder_name)
+        assert decoded == "Dan Simmons Hyperion & Endymion Band"
+
+    def test_html_unescape_multiple_entities(self):
+        """html.unescape should handle multiple HTML entities."""
+        import html
+        folder_name = "Author &amp; Title &lt;Book&gt;"
+        decoded = html.unescape(folder_name)
+        assert decoded == "Author & Title <Book>"
+
+    def test_html_unescape_no_entities(self):
+        """html.unescape should not modify strings without entities."""
+        import html
+        folder_name = "Dan Simmons Hyperion"
+        decoded = html.unescape(folder_name)
+        assert decoded == "Dan Simmons Hyperion"
+
+    def test_dic_replaces_ampersand_after_decode(self):
+        """After HTML decode, __dic__ should replace ' & ' with space."""
+        import html
+        from bookbagofholding.formatter import replace_all
+
+        folder_name = "Dan Simmons Hyperion &amp; Endymion"
+        # First decode HTML entities
+        decoded = html.unescape(folder_name)
+        assert decoded == "Dan Simmons Hyperion & Endymion"
+
+        # Then apply __dic__ replacement (replaces ' & ' with single space ' ')
+        cleaned = replace_all(decoded, postprocess.__dic__)
+        assert cleaned == "Dan Simmons Hyperion Endymion"
+
+    def test_matching_with_html_entities_in_folder(self, postprocess_config):
+        """Folder with HTML entities should match NZB title using fuzzy matching.
+
+        This tests the real-world scenario where:
+        - NZBtitle is 'HB Dan Simmons Hyperion Endymion'
+        - Folder name is 'Dan Simmons Hyperion &amp; Endymion Band'
+        """
+        import html
+        from fuzzywuzzy import fuzz
+        from bookbagofholding.formatter import unaccented_str, replace_all
+
+        # Simulate the NZBtitle processing
+        nzb_title = "HB Dan Simmons Hyperion Endymion"
+        matchtitle = unaccented_str(nzb_title)
+        matchtitle = html.unescape(matchtitle)
+        matchtitle = matchtitle.split(' LL.(')[0].replace('_', ' ')
+        matchtitle = replace_all(matchtitle, postprocess.__dic__)
+
+        # Simulate the folder name processing (with HTML entity)
+        folder_name = "Dan Simmons Hyperion &amp; Endymion Band"
+        matchname = unaccented_str(folder_name)
+        matchname = html.unescape(matchname)
+        matchname = matchname.split(' LL.(')[0].replace('_', ' ')
+        matchname = replace_all(matchname, postprocess.__dic__)
+
+        # Check that the fuzzy match is reasonable (should be > 80%)
+        match_ratio = fuzz.token_set_ratio(matchtitle, matchname)
+        assert match_ratio >= 80, f"Match ratio {match_ratio}% is too low for '{matchtitle}' vs '{matchname}'"
+
+    def test_matching_without_html_decode_fails(self, postprocess_config):
+        """Without HTML entity decoding, the ampersand is not properly cleaned.
+
+        This demonstrates the bug that was fixed - without html.unescape(),
+        '&amp;' is not converted to '&', so __dic__ replacement of ' & ' doesn't work.
+        """
+        from bookbagofholding.formatter import unaccented_str, replace_all
+
+        # Without HTML decode, &amp; stays as &amp;
+        folder_name = "Dan Simmons Hyperion &amp; Endymion"
+        matchname = unaccented_str(folder_name)
+        # Skip html.unescape - simulating the old behavior
+        matchname = matchname.split(' LL.(')[0].replace('_', ' ')
+        matchname = replace_all(matchname, postprocess.__dic__)
+
+        # &amp; should still be in the string (not replaced)
+        assert 'amp' in matchname, "Without HTML decode, 'amp' should remain in the string"
+
+    def test_html_entity_decode_applied_consistently(self, postprocess_config):
+        """Both matchtitle and matchname should have HTML entities decoded."""
+        import html
+        from bookbagofholding.formatter import unaccented_str, replace_all
+
+        # If NZBtitle has HTML entities (possible from some sources)
+        nzb_title = "Dan Simmons Hyperion &amp; Endymion"
+        matchtitle = unaccented_str(nzb_title)
+        matchtitle = html.unescape(matchtitle)
+        matchtitle = matchtitle.split(' LL.(')[0].replace('_', ' ')
+        matchtitle = replace_all(matchtitle, postprocess.__dic__)
+
+        # Folder name also with HTML entities
+        folder_name = "Dan Simmons Hyperion &amp; Endymion"
+        matchname = unaccented_str(folder_name)
+        matchname = html.unescape(matchname)
+        matchname = matchname.split(' LL.(')[0].replace('_', ' ')
+        matchname = replace_all(matchname, postprocess.__dic__)
+
+        # Should be identical after processing
+        assert matchtitle == matchname

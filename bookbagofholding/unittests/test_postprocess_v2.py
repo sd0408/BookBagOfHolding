@@ -37,8 +37,7 @@ class TestFileDetectorExtensions:
         with patch('bookbagofholding.postprocess_v2.detector.bookbagofholding') as mock_bb:
             mock_bb.CONFIG = {
                 'EBOOK_TYPE': 'epub,mobi,pdf',
-                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b',
-                'MAG_TYPE': 'pdf,epub'
+                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b'
             }
             yield mock_bb
 
@@ -68,14 +67,6 @@ class TestFileDetectorExtensions:
         assert '.m4a' in extensions
         assert '.m4b' in extensions
 
-    def test_get_magazine_extensions(self, mock_config):
-        """get_magazine_extensions should return configured extensions."""
-        from bookbagofholding.postprocess_v2.detector import FileDetector
-
-        extensions = FileDetector.get_magazine_extensions()
-        assert '.pdf' in extensions
-        assert '.epub' in extensions
-
 
 class TestFileDetectorIsChecks:
     """Tests for FileDetector is_* methods."""
@@ -86,8 +77,7 @@ class TestFileDetectorIsChecks:
         with patch('bookbagofholding.postprocess_v2.detector.bookbagofholding') as mock_bb:
             mock_bb.CONFIG = {
                 'EBOOK_TYPE': 'epub,mobi,pdf',
-                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b',
-                'MAG_TYPE': 'pdf,epub'
+                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b'
             }
             yield mock_bb
 
@@ -174,8 +164,7 @@ class TestFileDetectorDetectFileType:
         with patch('bookbagofholding.postprocess_v2.detector.bookbagofholding') as mock_bb:
             mock_bb.CONFIG = {
                 'EBOOK_TYPE': 'epub,mobi,pdf',
-                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b',
-                'MAG_TYPE': 'pdf,epub'
+                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b'
             }
             yield mock_bb
 
@@ -231,8 +220,7 @@ class TestFileDetectorDirectoryMethods:
         with patch('bookbagofholding.postprocess_v2.detector.bookbagofholding') as mock_bb:
             mock_bb.CONFIG = {
                 'EBOOK_TYPE': 'epub,mobi,pdf',
-                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b',
-                'MAG_TYPE': 'pdf,epub'
+                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b'
             }
             yield mock_bb
 
@@ -386,8 +374,7 @@ class TestFileDetectorEdgeCases:
         with patch('bookbagofholding.postprocess_v2.detector.bookbagofholding') as mock_bb:
             mock_bb.CONFIG = {
                 'EBOOK_TYPE': 'epub,mobi,pdf',
-                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b',
-                'MAG_TYPE': 'pdf,epub'
+                'AUDIOBOOK_TYPE': 'mp3,m4a,m4b'
             }
             yield mock_bb
 

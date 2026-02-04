@@ -81,15 +81,12 @@ class GeneralSettings:
     dir_perm: str = '0o755'
 
     # UI tabs
-    mag_tab: bool = True
     audio_tab: bool = True
     toggles: bool = True
 
     # Images
     author_img: bool = True
     book_img: bool = True
-    mag_img: bool = True
-    mag_single: bool = True
 
     # Sorting
     sort_definite: bool = False
@@ -116,7 +113,6 @@ class SearchSettings:
     """Search and matching settings."""
     # Intervals (in hours)
     book_interval: int = 360
-    mag_interval: int = 360
     scan_interval: int = 10
     rss_interval: int = 20
     wishlist_interval: int = 24
@@ -280,12 +276,6 @@ class PostProcessSettings:
     # Audiobook destinations
     audiobook_dest_file: str = '$Author - $Title Part $Part of $Total'
 
-    # Magazine destinations
-    mag_dest_folder: str = '_Magazines/$Title/$IssueDate'
-    mag_dest_file: str = '$IssueDate - $Title'
-    mag_relative: bool = True
-    mag_delfolder: bool = True
-
     # Options
     one_format: bool = False
 
@@ -295,21 +285,16 @@ class FileTypeSettings:
     """File type settings."""
     ebook_type: str = 'epub, mobi, pdf'
     audiobook_type: str = 'mp3'
-    mag_type: str = 'pdf'
 
     # Reject words
     reject_words: str = 'audiobook, mp3'
     reject_audio: str = 'epub, mobi'
-    reject_mags: str = ''
 
     # Size limits
     reject_maxsize: int = 0
     reject_minsize: int = 0
     reject_maxaudio: int = 0
     reject_minaudio: int = 0
-    reject_magsize: int = 0
-    reject_magmin: int = 0
-    mag_age: int = 31
 
     # Extensions
     skipped_ext: str = 'fail, part, bts, !ut, torrent, magnet, nzb, unpack'
@@ -386,9 +371,6 @@ class ImportSettings:
     autoadd: str = ''
     autoadd_copy: bool = True
     autoadd_bookonly: bool = False
-    autoaddmag: str = ''
-    autoaddmag_copy: bool = True
-    autoadd_magonly: bool = False
     autosearch: bool = False
 
     # Calibre
@@ -402,9 +384,6 @@ class ImportSettings:
     # Options
     singlebook: bool = False
     rename: bool = False
-    mag_rename: bool = False
-    mag_opf: bool = True
-    mag_cover: bool = True
     convert: str = ''
     preprocess: str = ''
 
@@ -540,7 +519,6 @@ class Configuration:
 
             # Search settings
             'SEARCH_BOOKINTERVAL': ('search', 'book_interval'),
-            'SEARCH_MAGINTERVAL': ('search', 'mag_interval'),
             'SCAN_INTERVAL': ('search', 'scan_interval'),
             'SEARCHRSS_INTERVAL': ('search', 'rss_interval'),
             'WISHLIST_INTERVAL': ('search', 'wishlist_interval'),
@@ -558,16 +536,12 @@ class Configuration:
             'EBOOK_DEST_FOLDER': ('postprocess', 'ebook_dest_folder'),
             'EBOOK_DEST_FILE': ('postprocess', 'ebook_dest_file'),
             'AUDIOBOOK_DEST_FILE': ('postprocess', 'audiobook_dest_file'),
-            'MAG_DEST_FOLDER': ('postprocess', 'mag_dest_folder'),
-            'MAG_DEST_FILE': ('postprocess', 'mag_dest_file'),
 
             # File type settings
             'EBOOK_TYPE': ('filetypes', 'ebook_type'),
             'AUDIOBOOK_TYPE': ('filetypes', 'audiobook_type'),
-            'MAG_TYPE': ('filetypes', 'mag_type'),
             'REJECT_WORDS': ('filetypes', 'reject_words'),
             'REJECT_AUDIO': ('filetypes', 'reject_audio'),
-            'REJECT_MAGS': ('filetypes', 'reject_mags'),
 
             # API settings
             'BOOK_API': ('api', 'book_api'),

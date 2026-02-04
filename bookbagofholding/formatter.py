@@ -403,8 +403,7 @@ def is_valid_isbn(isbn):
 
 
 def is_valid_type(filename, extras='jpg, opf'):
-    type_list = list(set(getList(bookbagofholding.CONFIG['MAG_TYPE']) +
-                         getList(bookbagofholding.CONFIG['AUDIOBOOK_TYPE']) +
+    type_list = list(set(getList(bookbagofholding.CONFIG['AUDIOBOOK_TYPE']) +
                          getList(bookbagofholding.CONFIG['EBOOK_TYPE']) +
                          getList(extras)))
     extn = os.path.splitext(filename)[1].lstrip('.')
@@ -417,9 +416,7 @@ def is_valid_booktype(filename, booktype=None):
     """
     Check if filename extension is one we want
     """
-    if booktype == 'mag':  # default is book
-        booktype_list = getList(bookbagofholding.CONFIG['MAG_TYPE'])
-    elif booktype == 'audiobook':
+    if booktype == 'audiobook':
         booktype_list = getList(bookbagofholding.CONFIG['AUDIOBOOK_TYPE'])
     else:
         booktype_list = getList(bookbagofholding.CONFIG['EBOOK_TYPE'])

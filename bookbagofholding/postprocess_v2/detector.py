@@ -60,16 +60,6 @@ class FileDetector:
         extensions = getList(bookbagofholding.CONFIG.get('AUDIOBOOK_TYPE', 'mp3,m4a,m4b'))
         return ['.' + ext.lower().lstrip('.') for ext in extensions if ext]
 
-    @staticmethod
-    def get_magazine_extensions() -> List[str]:
-        """Get configured magazine extensions.
-
-        Returns:
-            List of magazine file extensions (lowercase, with leading dot)
-        """
-        extensions = getList(bookbagofholding.CONFIG.get('MAG_TYPE', 'pdf,epub'))
-        return ['.' + ext.lower().lstrip('.') for ext in extensions if ext]
-
     @classmethod
     def is_ebook(cls, filepath: str) -> bool:
         """Check if a file is an ebook.
@@ -95,19 +85,6 @@ class FileDetector:
         """
         ext = os.path.splitext(filepath)[1].lower()
         return ext in cls.get_audiobook_extensions()
-
-    @classmethod
-    def is_magazine(cls, filepath: str) -> bool:
-        """Check if a file is a magazine.
-
-        Args:
-            filepath: Path to the file
-
-        Returns:
-            True if the file has a magazine extension
-        """
-        ext = os.path.splitext(filepath)[1].lower()
-        return ext in cls.get_magazine_extensions()
 
     @classmethod
     def is_archive(cls, filepath: str) -> bool:
@@ -156,15 +133,13 @@ class FileDetector:
             filepath: Path to the file
 
         Returns:
-            File type string: 'ebook', 'audiobook', 'magazine', 'archive',
+            File type string: 'ebook', 'audiobook', 'archive',
             'image', 'metadata', or 'unknown'
         """
         if cls.is_ebook(filepath):
             return 'ebook'
         elif cls.is_audiobook(filepath):
             return 'audiobook'
-        elif cls.is_magazine(filepath):
-            return 'magazine'
         elif cls.is_archive(filepath):
             return 'archive'
         elif cls.is_image(filepath):

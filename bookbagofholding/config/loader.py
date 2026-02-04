@@ -222,7 +222,6 @@ class ConfigLoader:
 
         # Search settings
         config.search.book_interval = self._get_int(legacy_config, 'SEARCH_BOOKINTERVAL', 360)
-        config.search.mag_interval = self._get_int(legacy_config, 'SEARCH_MAGINTERVAL', 360)
         config.search.scan_interval = self._get_int(legacy_config, 'SCAN_INTERVAL', 10)
         config.search.rss_interval = self._get_int(legacy_config, 'SEARCHRSS_INTERVAL', 20)
         config.search.wishlist_interval = self._get_int(legacy_config, 'WISHLIST_INTERVAL', 24)
@@ -242,13 +241,10 @@ class ConfigLoader:
         config.postprocess.audiobook_dest_file = legacy_config.get(
             'AUDIOBOOK_DEST_FILE', '$Author - $Title Part $Part of $Total'
         )
-        config.postprocess.mag_dest_folder = legacy_config.get('MAG_DEST_FOLDER', '_Magazines/$Title/$IssueDate')
-        config.postprocess.mag_dest_file = legacy_config.get('MAG_DEST_FILE', '$IssueDate - $Title')
 
         # File type settings
         config.filetypes.ebook_type = legacy_config.get('EBOOK_TYPE', 'epub, mobi, pdf')
         config.filetypes.audiobook_type = legacy_config.get('AUDIOBOOK_TYPE', 'mp3')
-        config.filetypes.mag_type = legacy_config.get('MAG_TYPE', 'pdf')
         config.filetypes.reject_words = legacy_config.get('REJECT_WORDS', 'audiobook, mp3')
 
         # API settings
@@ -298,7 +294,6 @@ class ConfigLoader:
 
         # Search settings
         legacy['SEARCH_BOOKINTERVAL'] = config.search.book_interval
-        legacy['SEARCH_MAGINTERVAL'] = config.search.mag_interval
         legacy['SCAN_INTERVAL'] = config.search.scan_interval
         legacy['SEARCHRSS_INTERVAL'] = config.search.rss_interval
         legacy['WISHLIST_INTERVAL'] = config.search.wishlist_interval
@@ -316,13 +311,10 @@ class ConfigLoader:
         legacy['EBOOK_DEST_FOLDER'] = config.postprocess.ebook_dest_folder
         legacy['EBOOK_DEST_FILE'] = config.postprocess.ebook_dest_file
         legacy['AUDIOBOOK_DEST_FILE'] = config.postprocess.audiobook_dest_file
-        legacy['MAG_DEST_FOLDER'] = config.postprocess.mag_dest_folder
-        legacy['MAG_DEST_FILE'] = config.postprocess.mag_dest_file
 
         # File type settings
         legacy['EBOOK_TYPE'] = config.filetypes.ebook_type
         legacy['AUDIOBOOK_TYPE'] = config.filetypes.audiobook_type
-        legacy['MAG_TYPE'] = config.filetypes.mag_type
         legacy['REJECT_WORDS'] = config.filetypes.reject_words
 
         # API settings
@@ -386,7 +378,6 @@ class ConfigLoader:
     def _load_search_settings(self, config: Configuration) -> None:
         """Load search settings from parser."""
         config.search.book_interval = int(self._get_setting('SearchScan', 'search_bookinterval', 360) or 360)
-        config.search.mag_interval = int(self._get_setting('SearchScan', 'search_maginterval', 360) or 360)
         config.search.scan_interval = int(self._get_setting('SearchScan', 'scan_interval', 10) or 10)
         config.search.match_ratio = int(self._get_setting('General', 'match_ratio', 80) or 80)
         config.search.dload_ratio = int(self._get_setting('General', 'dload_ratio', 90) or 90)
@@ -430,7 +421,6 @@ class ConfigLoader:
         """Load file type settings from parser."""
         config.filetypes.ebook_type = self._get_setting('General', 'ebook_type', 'epub, mobi, pdf') or 'epub, mobi, pdf'
         config.filetypes.audiobook_type = self._get_setting('General', 'audiobook_type', 'mp3') or 'mp3'
-        config.filetypes.mag_type = self._get_setting('General', 'mag_type', 'pdf') or 'pdf'
 
     def _load_notification_settings(self, config: Configuration) -> None:
         """Load notification settings from parser."""
@@ -468,7 +458,6 @@ class ConfigLoader:
     def _save_search_settings(self, config: Configuration) -> None:
         """Save search settings to parser."""
         self._parser.set('SearchScan', 'search_bookinterval', str(config.search.book_interval))
-        self._parser.set('SearchScan', 'search_maginterval', str(config.search.mag_interval))
 
     def _save_download_settings(self, config: Configuration) -> None:
         """Save download settings to parser."""
