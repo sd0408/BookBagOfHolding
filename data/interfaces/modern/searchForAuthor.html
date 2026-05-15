@@ -55,12 +55,11 @@
             <h1 class="ll-page-title">Search for Author</h1>
         </div>
     </div>
-
     <div class="ll-card">
         <div class="ll-card-body">
             <form action="search" method="get" class="ll-search-form">
                 <div class="ll-search-box">
-                    <input type="text" name="name" class="ll-input" placeholder="Enter author name..." autofocus required>
+                    <input type="text" name="name" id="authorSearchInput" class="ll-input" placeholder="Enter author name..." required>
                     <button type="submit" class="ll-btn ll-btn-primary">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                             <circle cx="11" cy="11" r="8"></circle>
@@ -70,7 +69,6 @@
                     </button>
                 </div>
             </form>
-
             <div class="ll-search-help">
                 <h3>Search Tips</h3>
                 <p>Enter an author name to search for them in the configured metadata sources. You can then add the author to your library from the search results.</p>
@@ -79,4 +77,18 @@
     </div>
 </%def>
 <%def name="javascriptIncludes()">
+<script>
+    // Only auto-focus on non-mobile devices to avoid keyboard/focus issues on mobile
+    // that cause the input to appear hidden and text to be entered in reverse order
+    document.addEventListener('DOMContentLoaded', function() {
+        var isMobile = /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(navigator.userAgent)
+                    || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+        if (!isMobile) {
+            var input = document.getElementById('authorSearchInput');
+            if (input) {
+                input.focus();
+            }
+        }
+    });
+</script>
 </%def>
