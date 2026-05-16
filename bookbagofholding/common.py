@@ -402,44 +402,73 @@ def jpg_file(search_dir=None):
     return any_file(search_dir, '.jpg')
 
 
-def book_file(search_dir=None, booktype=None):
+def book_file(search_dir=None, booktype=None, recurse=False):
     # find a book/mag file in this directory, any book will do
     # return full pathname of book/mag, or empty string if none found
+    # recurse=True walks subdirectories (e.g. SAB job folder with a release subfolder).
     if search_dir is None or booktype is None:
         return ""
-    if search_dir and os.path.isdir(search_dir):
+    if not search_dir or not os.path.isdir(search_dir):
+        return ""
+    if recurse:
         try:
-            for fname in os.listdir(makeBytestr(search_dir)):
-                fname = makeUnicode(fname)
-                if is_valid_booktype(fname, booktype=booktype):
-                    return os.path.join(search_dir, fname)
+            for root, _, files in os.walk(makeBytestr(search_dir)):
+                root = makeUnicode(root)
+                for fname in files:
+                    fname = makeUnicode(fname)
+                    if is_valid_booktype(fname, booktype=booktype):
+                        return os.path.join(root, fname)
         except Exception as e:
-            logger.warn('Listdir error [%s]: %s %s' % (search_dir, type(e).__name__, str(e)))
+            logger.warn('Walk error [%s]: %s %s' % (search_dir, type(e).__name__, str(e)))
+        return ""
+    try:
+        for fname in os.listdir(makeBytestr(search_dir)):
+            fname = makeUnicode(fname)
+            if is_valid_booktype(fname, booktype=booktype):
+                return os.path.join(search_dir, fname)
+    except Exception as e:
+        logger.warn('Listdir error [%s]: %s %s' % (search_dir, type(e).__name__, str(e)))
     return ""
 
 
-def get_files_by_type(search_dir):
+def get_files_by_type(search_dir, recurse=False):
     """
     Scan a directory and return a dict with lists of files by type.
     Returns: {'ebook': [...], 'audiobook': [...], 'other': [...]}
+    When recurse=True, walks subdirectories; entries are paths relative to
+    search_dir so logs and diagnostics remain readable.
     """
     result = {'ebook': [], 'audiobook': [], 'other': []}
     if not search_dir or not os.path.isdir(search_dir):
         return result
 
+    def classify(name):
+        if is_valid_booktype(name, booktype='ebook'):
+            return 'ebook'
+        if is_valid_booktype(name, booktype='audiobook'):
+            return 'audiobook'
+        if os.path.splitext(name)[1].lstrip('.').lower():
+            return 'other'
+        return None
+
     try:
-        for fname in os.listdir(makeBytestr(search_dir)):
-            fname = makeUnicode(fname)
-            fpath = os.path.join(search_dir, fname)
-            if os.path.isfile(fpath):
-                if is_valid_booktype(fname, booktype='ebook'):
-                    result['ebook'].append(fname)
-                elif is_valid_booktype(fname, booktype='audiobook'):
-                    result['audiobook'].append(fname)
-                else:
-                    extn = os.path.splitext(fname)[1].lstrip('.').lower()
-                    if extn:
-                        result['other'].append(fname)
+        if recurse:
+            for root, _, files in os.walk(makeBytestr(search_dir)):
+                root = makeUnicode(root)
+                for fname in files:
+                    fname = makeUnicode(fname)
+                    bucket = classify(fname)
+                    if bucket:
+                        rel = os.path.relpath(os.path.join(root, fname), search_dir)
+                        result[bucket].append(rel)
+        else:
+            for fname in os.listdir(makeBytestr(search_dir)):
+                fname = makeUnicode(fname)
+                fpath = os.path.join(search_dir, fname)
+                if os.path.isfile(fpath):
+                    bucket = classify(fname)
+                    if bucket:
+                        result[bucket].append(fname)
     except Exception as e:
         logger.warn('Error scanning directory [%s]: %s %s' % (search_dir, type(e).__name__, str(e)))
 

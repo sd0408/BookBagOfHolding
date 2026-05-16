@@ -179,6 +179,17 @@ def fail_unsupported_filetype(book, book_type, pp_path, files_found):
 
     logger.warn("%s for %s" % (error_msg, book['NZBtitle']))
 
+    # Log the full recursive listing so nested-layout false positives are
+    # diagnosable from logs alone (see fail_unsupported_filetype docstring).
+    listed = (files_found.get('ebook', []) +
+              files_found.get('audiobook', []) +
+              other_files)
+    if listed:
+        sample = listed[:20]
+        logger.warn("Contents of %s: %s%s" %
+                    (pp_path, ', '.join(sample),
+                     ' (and %d more)' % (len(listed) - len(sample)) if len(listed) > len(sample) else ''))
+
     # Update wanted table to Failed status
     myDB.action('UPDATE wanted SET Status="Failed", DLResult=? WHERE NZBurl=? AND Status="Snatched"',
                 (error_msg, book['NZBurl']))
@@ -672,27 +683,33 @@ def processDir(reset=False, startdir=None, ignoreclient=False):
                                         logger.debug("Skipping %s, found multiple %s" % (pp_path, mult))
                                         skipped = True
                                     elif book_type == 'eBook' and not book_file(pp_path, 'ebook'):
-                                        # Check if wrong file type present (type mismatch)
-                                        files_found = get_files_by_type(pp_path)
-                                        if files_found['audiobook']:
-                                            fail_type_mismatch(book, book_type, pp_path, files_found)
-                                        elif files_found['other']:
-                                            # Download contains only unsupported file types
-                                            fail_unsupported_filetype(book, book_type, pp_path, files_found)
+                                        nested = book_file(pp_path, 'ebook', recurse=True)
+                                        if nested:
+                                            pp_path = os.path.dirname(nested)
+                                            logger.debug("Found nested ebook layout, processing %s" % pp_path)
                                         else:
-                                            logger.debug("Skipping %s, no ebook found" % pp_path)
-                                        skipped = True
+                                            files_found = get_files_by_type(pp_path, recurse=True)
+                                            if files_found['audiobook']:
+                                                fail_type_mismatch(book, book_type, pp_path, files_found)
+                                            elif files_found['other']:
+                                                fail_unsupported_filetype(book, book_type, pp_path, files_found)
+                                            else:
+                                                logger.debug("Skipping %s, no ebook found" % pp_path)
+                                            skipped = True
                                     elif book_type == 'AudioBook' and not book_file(pp_path, 'audiobook'):
-                                        # Check if wrong file type present (type mismatch)
-                                        files_found = get_files_by_type(pp_path)
-                                        if files_found['ebook']:
-                                            fail_type_mismatch(book, book_type, pp_path, files_found)
-                                        elif files_found['other']:
-                                            # Download contains only unsupported file types
-                                            fail_unsupported_filetype(book, book_type, pp_path, files_found)
+                                        nested = book_file(pp_path, 'audiobook', recurse=True)
+                                        if nested:
+                                            pp_path = os.path.dirname(nested)
+                                            logger.debug("Found nested audiobook layout, processing %s" % pp_path)
                                         else:
-                                            logger.debug("Skipping %s, no audiobook found" % pp_path)
-                                        skipped = True
+                                            files_found = get_files_by_type(pp_path, recurse=True)
+                                            if files_found['ebook']:
+                                                fail_type_mismatch(book, book_type, pp_path, files_found)
+                                            elif files_found['other']:
+                                                fail_unsupported_filetype(book, book_type, pp_path, files_found)
+                                            else:
+                                                logger.debug("Skipping %s, no audiobook found" % pp_path)
+                                            skipped = True
                                     if not skipped and os.path.isdir(pp_path) and not os.listdir(makeBytestr(pp_path)):
                                         logger.debug("Skipping %s, folder is empty" % pp_path)
                                         skipped = True

@@ -358,6 +358,101 @@ class TestBookFile:
             assert result != ''
             assert 'epub' in result
 
+    def test_book_file_non_recursive_misses_nested(self):
+        """book_file should NOT find files in subdirectories by default."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'release.nfo'), 'w') as f:
+                f.write('top-level junk')
+            subdir = os.path.join(tmpdir, 'release-subfolder')
+            os.makedirs(subdir)
+            nested = os.path.join(subdir, 'book.m4b')
+            with open(nested, 'w') as f:
+                f.write('audio')
+            result = common.book_file(tmpdir, 'audiobook')
+            assert result == ''
+
+    def test_book_file_recursive_finds_nested_audiobook(self):
+        """book_file(recurse=True) should descend into subfolders.
+
+        Reproduces the SAB nested-layout bug where job folder contains only
+        an .nfo at top with the .m4b one directory deeper.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'release.nfo'), 'w') as f:
+                f.write('top-level junk')
+            subdir = os.path.join(tmpdir, 'release-subfolder')
+            os.makedirs(subdir)
+            nested = os.path.join(subdir, 'book.m4b')
+            with open(nested, 'w') as f:
+                f.write('audio')
+            result = common.book_file(tmpdir, 'audiobook', recurse=True)
+            assert result == nested
+
+    def test_book_file_recursive_finds_nested_ebook(self):
+        """book_file(recurse=True) should find ebooks in subdirectories."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subdir = os.path.join(tmpdir, 'inner')
+            os.makedirs(subdir)
+            nested = os.path.join(subdir, 'book.epub')
+            with open(nested, 'w') as f:
+                f.write('ebook')
+            result = common.book_file(tmpdir, 'ebook', recurse=True)
+            assert result == nested
+
+    def test_book_file_recursive_returns_empty_when_nothing(self):
+        """book_file(recurse=True) returns '' when no media exists at any depth."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subdir = os.path.join(tmpdir, 'inner')
+            os.makedirs(subdir)
+            with open(os.path.join(subdir, 'readme.txt'), 'w') as f:
+                f.write('nope')
+            result = common.book_file(tmpdir, 'audiobook', recurse=True)
+            assert result == ''
+
+
+class TestGetFilesByType:
+    """Tests for get_files_by_type() function."""
+
+    def test_classifies_top_level(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ('book.epub', 'audio.m4b', 'notes.nfo'):
+                with open(os.path.join(tmpdir, name), 'w') as f:
+                    f.write('x')
+            result = common.get_files_by_type(tmpdir)
+            assert result['ebook'] == ['book.epub']
+            assert result['audiobook'] == ['audio.m4b']
+            assert result['other'] == ['notes.nfo']
+
+    def test_non_recursive_misses_nested(self):
+        """Default scan only sees the top level (the bug case)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'release.nfo'), 'w') as f:
+                f.write('x')
+            subdir = os.path.join(tmpdir, 'release-subfolder')
+            os.makedirs(subdir)
+            with open(os.path.join(subdir, 'book.m4b'), 'w') as f:
+                f.write('x')
+            result = common.get_files_by_type(tmpdir)
+            assert result['audiobook'] == []
+            assert result['other'] == ['release.nfo']
+
+    def test_recursive_finds_nested(self):
+        """recurse=True surfaces nested media using relative paths."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'release.nfo'), 'w') as f:
+                f.write('x')
+            subdir = os.path.join(tmpdir, 'release-subfolder')
+            os.makedirs(subdir)
+            with open(os.path.join(subdir, 'book.m4b'), 'w') as f:
+                f.write('x')
+            result = common.get_files_by_type(tmpdir, recurse=True)
+            assert os.path.join('release-subfolder', 'book.m4b') in result['audiobook']
+            assert 'release.nfo' in result['other']
+
+    def test_returns_empty_for_invalid_dir(self):
+        result = common.get_files_by_type('/this/path/does/not/exist')
+        assert result == {'ebook': [], 'audiobook': [], 'other': []}
+
 
 class TestJpgFile:
     """Tests for jpg_file() function."""
