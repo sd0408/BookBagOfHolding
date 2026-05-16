@@ -105,11 +105,17 @@ def safe_move(src, dst, action='move'):
         eg windows can't handle <>?":| (and maybe others) in filenames
         Return (new) dst if success """
 
+    # Only fall back to copytree when dst is genuinely *inside* src (a child path),
+    # not when dst merely shares a string prefix with src. Plain startswith() incorrectly
+    # treated sibling renames like "/foo" -> "/foo.fail" as nested, calling copytree
+    # (which leaves the source in place) instead of move, producing duplicate folders.
+    src_sep = os.path.normpath(src) + os.sep if src else ''
+
     while action:  # might have more than one problem...
         try:
             if action == 'copy':
                 shutil.copy(src, dst)
-            elif os.path.isdir(src) and dst.startswith(src):
+            elif os.path.isdir(src) and src_sep and os.path.normpath(dst).startswith(src_sep):
                 shutil.copytree(src, dst)
             else:
                 shutil.move(src, dst)

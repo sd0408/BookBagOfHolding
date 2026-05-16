@@ -234,6 +234,43 @@ class TestSafeMove:
             assert os.path.exists(dst)
             assert os.path.exists(src)  # Source should still exist
 
+    def test_safe_move_sibling_rename_does_not_duplicate(self):
+        """Renaming a directory to a sibling whose name shares a string prefix
+        (e.g. 'foo' -> 'foo.fail') must move, not copy. A naive startswith() check
+        would treat 'foo.fail' as nested under 'foo' and call copytree, leaving the
+        source on disk — the bug behind duplicate '.fail' folders after failed
+        post-processing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, 'job-folder')
+            os.makedirs(src)
+            with open(os.path.join(src, 'book.epub'), 'w') as f:
+                f.write('content')
+
+            dst = src + '.fail'
+            result = common.safe_move(src, dst)
+            assert result == dst
+            assert os.path.isdir(dst)
+            assert os.path.isfile(os.path.join(dst, 'book.epub'))
+            # Critical assertion: the source must be gone (no duplicate).
+            assert not os.path.exists(src)
+
+    def test_safe_move_nested_target_uses_copytree(self):
+        """If dst is genuinely *inside* src as a child path, fall back to copytree
+        (this is the original intent of the special case — kept for compatibility)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, 'parent')
+            os.makedirs(src)
+            with open(os.path.join(src, 'a.txt'), 'w') as f:
+                f.write('content')
+
+            dst = os.path.join(src, 'child')
+            result = common.safe_move(src, dst)
+            assert result == dst
+            assert os.path.isdir(dst)
+            assert os.path.isfile(os.path.join(dst, 'a.txt'))
+            # Source remains because copytree was used.
+            assert os.path.isdir(src)
+
 
 class TestSafeCopy:
     """Tests for safe_copy() function."""

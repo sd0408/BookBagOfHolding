@@ -56,6 +56,88 @@ def update_downloads(provider):
         myDB.action('INSERT into downloads (Count, Provider) VALUES  (?, ?)', (1, provider))
 
 
+def _normalize_for_match(text):
+    """ Apply the same name-normalization used during folder/book fuzzy matching.
+        Keep in sync with the inline normalization in processDir(). """
+    text = unaccented_str(text or '')
+    text = html.unescape(text)
+    text = text.split(' LL.(')[0].replace('_', ' ')
+    return replace_all(text, __dic__)
+
+
+def is_best_snatched_owner(snatched, current_book, folder_matchname, current_match):
+    """ Return True if current_book has the highest fuzz score against folder_matchname
+        among all snatched books.
+
+        Used to guard fail_type_mismatch / fail_unsupported_filetype calls so that a
+        folder belonging to book B (e.g. "Definitely Dead") does not incorrectly fail
+        book A's snatch (e.g. "From Dead To Worse") when A's NZBtitle happens to
+        fuzzy-match folder B's name above the download ratio threshold — common in
+        series with similar titles where shared tokens push the score above DLOAD_RATIO. """
+    try:
+        current_url = current_book['NZBurl']
+    except (KeyError, IndexError):
+        current_url = None
+    for other in snatched:
+        try:
+            other_url = other['NZBurl']
+        except (KeyError, IndexError):
+            other_url = None
+        if other_url is not None and other_url == current_url:
+            continue
+        other_title = _normalize_for_match(other['NZBtitle'])
+        other_match = fuzz.token_set_ratio(other_title, folder_matchname)
+        if other_match > current_match:
+            return False
+    return True
+
+
+def filename_matches_book(pp_path, bookname, threshold=None):
+    """ Sanity-check that the book files in pp_path actually look like bookname.
+
+        Snatched titles can fuzzy-match a download folder while the file(s) inside
+        are for a completely different book (e.g. a release titled "Dead Ever After"
+        whose epub is "After Dead - Charlaine Harris.epub"). Calibre then rejects
+        the import as "already exists" because the wrong book is already in the
+        library, which is a misleading signal and leaves the snatch in limbo.
+
+        Uses partial_ratio rather than token_set_ratio: token_set_ratio collapses
+        shared tokens and treats "After Dead" as 80% match for "Dead Ever After"
+        (precisely the false-positive we need to catch), whereas partial_ratio
+        looks for the bookname as a contiguous substring of the filename and
+        correctly distinguishes "Dead Ever After.epub" (~100) from
+        "After Dead - Charlaine Harris.epub" (~53).
+
+        Returns True if at least one book file's basename fuzzy-matches bookname
+        above threshold (defaults to MATCH_RATIO). Returns True if pp_path is not
+        a directory or no book file is present (let downstream logic handle it). """
+    if not pp_path or not os.path.isdir(pp_path):
+        return True
+    if not bookname:
+        return True
+    if threshold is None:
+        threshold = bookbagofholding.CONFIG.get('MATCH_RATIO', 80)
+    target = _normalize_for_match(bookname).lower()
+    if not target:
+        return True
+    try:
+        entries = os.listdir(makeBytestr(pp_path))
+    except OSError:
+        return True
+    entries = [makeUnicode(item) for item in entries]
+    found_any = False
+    for entry in entries:
+        if not is_valid_type(entry):
+            continue
+        found_any = True
+        stem = _normalize_for_match(os.path.splitext(entry)[0]).lower()
+        if fuzz.partial_ratio(target, stem) >= threshold:
+            return True
+    if not found_any:
+        return True  # nothing recognised at top level — let downstream handle
+    return False
+
+
 def fail_type_mismatch(book, book_type, pp_path, files_found):
     """
     Handle failure when download contains wrong file type.
@@ -249,6 +331,83 @@ def fail_unsupported_filetype(book, book_type, pp_path, files_found):
             name='SEARCH-RETRY-%s' % book['BookID'],
             args=[[{'bookid': book['BookID']}], book_type]
         ).start()
+
+    return error_msg
+
+
+def fail_title_mismatch(book, book_type, pp_path, bookname, found_files):
+    """
+    Handle failure when the actual file contents don't fuzzy-match the wanted book title.
+
+    Used to short-circuit Calibre import when, for example, a snatch of "Dead Ever After"
+    contains a file actually named "After Dead - Charlaine Harris.epub". Without this
+    pre-check Calibre rejects with the misleading "already exists" error (because the
+    *wrong* book happens to be in the library already), the snatch is left in limbo
+    and the release is liable to be re-grabbed on the next search cycle.
+
+    Args:
+        book: dict from wanted table (NZBurl, NZBtitle, NZBprov, BookID, Source, ...)
+        book_type: expected type ('eBook' or 'AudioBook')
+        pp_path: path to the downloaded files
+        bookname: expected book title from the books table
+        found_files: list of book-type filenames we actually saw in pp_path
+    """
+    myDB = database.DBConnection()
+
+    sample = found_files[:3]
+    file_desc = ', '.join(sample)
+    if len(found_files) > 3:
+        file_desc += ' (and %d more)' % (len(found_files) - 3)
+
+    error_msg = ('Title mismatch: expected "%s" but files do not match (%s)'
+                 % (bookname or '?', file_desc))
+
+    logger.warn("%s for %s" % (error_msg, book['NZBtitle']))
+
+    myDB.action('UPDATE wanted SET Status="Failed", DLResult=? WHERE NZBurl=? AND Status="Snatched"',
+                (error_msg, book['NZBurl']))
+
+    if book['BookID'] != 'unknown':
+        if book_type == 'eBook':
+            myDB.action('UPDATE books SET status="Wanted" WHERE status="Snatched" AND BookID=?',
+                        (book['BookID'],))
+        elif book_type == 'AudioBook':
+            myDB.action('UPDATE books SET audiostatus="Wanted" WHERE audiostatus="Snatched" AND BookID=?',
+                        (book['BookID'],))
+
+    if bookbagofholding.CONFIG['BLACKLIST_FAILED']:
+        try:
+            aux_info = book['AuxInfo']
+        except (KeyError, IndexError):
+            aux_info = None
+        add_to_blacklist(book['NZBurl'], book['NZBtitle'], book['NZBprov'],
+                         book['BookID'], aux_info, 'TitleMismatch')
+
+    if book['Source'] and book['Source'] != 'DIRECT':
+        delete_task(book['Source'], book['DownloadID'], True)
+
+    if pp_path and os.path.isdir(pp_path):
+        if bookbagofholding.CONFIG['DESTINATION_COPY']:
+            fail_path = pp_path + '.fail'
+            if os.path.isdir(fail_path):
+                try:
+                    shutil.rmtree(fail_path)
+                except Exception as why:
+                    logger.warn("Unable to remove old %s: %s %s" %
+                                (fail_path, type(why).__name__, str(why)))
+            try:
+                shutil.move(pp_path, fail_path)
+                logger.debug("Renamed %s to %s" % (pp_path, fail_path))
+            except Exception as why:
+                logger.warn("Unable to rename %s to .fail: %s %s" %
+                            (pp_path, type(why).__name__, str(why)))
+        else:
+            try:
+                shutil.rmtree(pp_path)
+                logger.debug("Deleted mismatched files from %s" % pp_path)
+            except Exception as why:
+                logger.warn("Unable to delete %s: %s %s" %
+                            (pp_path, type(why).__name__, str(why)))
 
     return error_msg
 
@@ -688,13 +847,21 @@ def processDir(reset=False, startdir=None, ignoreclient=False):
                                             pp_path = os.path.dirname(nested)
                                             logger.debug("Found nested ebook layout, processing %s" % pp_path)
                                         else:
-                                            files_found = get_files_by_type(pp_path, recurse=True)
-                                            if files_found['audiobook']:
-                                                fail_type_mismatch(book, book_type, pp_path, files_found)
-                                            elif files_found['other']:
-                                                fail_unsupported_filetype(book, book_type, pp_path, files_found)
+                                            # Only fail the snatch if this book actually owns the folder.
+                                            # Otherwise the wrong NZBurl gets blacklisted / marked Failed
+                                            # when a sibling snatch in the same series shares enough
+                                            # tokens to fuzz-match above DLOAD_RATIO.
+                                            if is_best_snatched_owner(snatched, book, matchname, match):
+                                                files_found = get_files_by_type(pp_path, recurse=True)
+                                                if files_found['audiobook']:
+                                                    fail_type_mismatch(book, book_type, pp_path, files_found)
+                                                elif files_found['other']:
+                                                    fail_unsupported_filetype(book, book_type, pp_path, files_found)
+                                                else:
+                                                    logger.debug("Skipping %s, no ebook found" % pp_path)
                                             else:
-                                                logger.debug("Skipping %s, no ebook found" % pp_path)
+                                                logger.debug("Skipping %s for %s, folder is a better match for another snatched book"
+                                                             % (pp_path, book['NZBtitle']))
                                             skipped = True
                                     elif book_type == 'AudioBook' and not book_file(pp_path, 'audiobook'):
                                         nested = book_file(pp_path, 'audiobook', recurse=True)
@@ -702,13 +869,17 @@ def processDir(reset=False, startdir=None, ignoreclient=False):
                                             pp_path = os.path.dirname(nested)
                                             logger.debug("Found nested audiobook layout, processing %s" % pp_path)
                                         else:
-                                            files_found = get_files_by_type(pp_path, recurse=True)
-                                            if files_found['ebook']:
-                                                fail_type_mismatch(book, book_type, pp_path, files_found)
-                                            elif files_found['other']:
-                                                fail_unsupported_filetype(book, book_type, pp_path, files_found)
+                                            if is_best_snatched_owner(snatched, book, matchname, match):
+                                                files_found = get_files_by_type(pp_path, recurse=True)
+                                                if files_found['ebook']:
+                                                    fail_type_mismatch(book, book_type, pp_path, files_found)
+                                                elif files_found['other']:
+                                                    fail_unsupported_filetype(book, book_type, pp_path, files_found)
+                                                else:
+                                                    logger.debug("Skipping %s, no audiobook found" % pp_path)
                                             else:
-                                                logger.debug("Skipping %s, no audiobook found" % pp_path)
+                                                logger.debug("Skipping %s for %s, folder is a better match for another snatched book"
+                                                             % (pp_path, book['NZBtitle']))
                                             skipped = True
                                     if not skipped and os.path.isdir(pp_path) and not os.listdir(makeBytestr(pp_path)):
                                         logger.debug("Skipping %s, folder is empty" % pp_path)
@@ -780,6 +951,24 @@ def processDir(reset=False, startdir=None, ignoreclient=False):
                                     logger.debug('Match: %s%%  %s' % (match[0], match[1]))
 
                     if not dest_path:
+                        continue
+
+                    # Pre-Calibre sanity check: ebook downloads sometimes contain a file
+                    # for a *different* book in the same author (e.g. snatched
+                    # "Dead Ever After" -> file is "After Dead - Charlaine Harris.epub").
+                    # Calibre rejects these as "already exists" which is misleading and
+                    # leaves the snatch in limbo. Catch the mismatch here so the snatch
+                    # is failed, the release blocklisted, and the folder cleaned up.
+                    if book_type == 'eBook' and bookname and \
+                            not filename_matches_book(pp_path, bookname):
+                        try:
+                            entries = [makeUnicode(item)
+                                       for item in os.listdir(makeBytestr(pp_path))]
+                        except OSError:
+                            entries = []
+                        ebook_entries = [e for e in entries
+                                         if is_valid_type(e) and is_valid_booktype(e, booktype='ebook')]
+                        fail_title_mismatch(book, book_type, pp_path, bookname, ebook_entries)
                         continue
 
                     success, dest_file = processDestination(pp_path, dest_path, authorname, bookname,

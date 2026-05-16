@@ -1354,3 +1354,266 @@ class TestHtmlEntityHandling:
 
         # Should be identical after processing
         assert matchtitle == matchname
+
+
+class TestIsBestSnatchedOwner:
+    """Tests for is_best_snatched_owner() — guards against wrong-book failure
+    when sibling snatches in the same series fuzz-match each other's folders."""
+
+    def _normalize(self, text):
+        from bookbagofholding.postprocess import _normalize_for_match
+        return _normalize_for_match(text)
+
+    def test_single_book_owns_folder(self, postprocess_config):
+        """With only one snatched book, it always owns the folder."""
+        book = {
+            'NZBurl': 'http://example.com/1',
+            'NZBtitle': 'Charlaine Harris Definitely Dead par yEnc',
+        }
+        snatched = [book]
+        matchname = self._normalize(
+            'Charlaine Harris Sookie Stackhouse Definitely Dead')
+        assert postprocess.is_best_snatched_owner(snatched, book, matchname, 95)
+
+    def test_sibling_book_wins_ownership(self, postprocess_config):
+        """Folder for book B should NOT be flagged as owned by book A,
+        even when A's NZBtitle scores above DLOAD_RATIO against B's folder name."""
+        from fuzzywuzzy import fuzz
+        book_a = {
+            'NZBurl': 'http://example.com/from-dead-to-worse',
+            'NZBtitle': 'NMR _ Charlaine Harris Sookie Stackhouse From Dead To Worse par yEnc',
+        }
+        book_b = {
+            'NZBurl': 'http://example.com/definitely-dead',
+            'NZBtitle': 'NMR _ Charlaine Harris Sookie Stackhouse Definitely Dead par yEnc',
+        }
+        snatched = [book_a, book_b]
+        # Folder for book B
+        folder_b = self._normalize(
+            'NMR _ Charlaine Harris Sookie Stackhouse Definitely Dead par yEnc')
+        match_a_vs_b = fuzz.token_set_ratio(
+            self._normalize(book_a['NZBtitle']), folder_b)
+        # The fuzz score is high because of shared series tokens — that's the bug surface.
+        assert match_a_vs_b >= 80
+        # Ownership check should still correctly attribute folder B to book B.
+        assert not postprocess.is_best_snatched_owner(
+            snatched, book_a, folder_b, match_a_vs_b)
+        match_b_vs_b = fuzz.token_set_ratio(
+            self._normalize(book_b['NZBtitle']), folder_b)
+        assert postprocess.is_best_snatched_owner(
+            snatched, book_b, folder_b, match_b_vs_b)
+
+    def test_higher_match_loses_to_equal_match(self, postprocess_config):
+        """Ties go to the current book — only a strictly higher match for another
+        snatched book disqualifies ownership. This prevents flip-flopping when two
+        snatched books normalize to the same title."""
+        book_a = {
+            'NZBurl': 'http://example.com/a',
+            'NZBtitle': 'Same Title',
+        }
+        book_b = {
+            'NZBurl': 'http://example.com/b',
+            'NZBtitle': 'Same Title',
+        }
+        snatched = [book_a, book_b]
+        folder = self._normalize('Same Title')
+        # Both books would tie on this folder
+        assert postprocess.is_best_snatched_owner(snatched, book_a, folder, 100)
+
+
+class TestFilenameMatchesBook:
+    """Tests for filename_matches_book() — pre-Calibre title sanity check."""
+
+    def test_matches_book_with_close_filename(self, postprocess_config):
+        """Filename close to bookname should match."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'Dead Ever After.epub'), 'w') as f:
+                f.write('x')
+            assert postprocess.filename_matches_book(tmpdir, 'Dead Ever After')
+
+    def test_rejects_unrelated_filename(self, postprocess_config):
+        """A snatch of 'Dead Ever After' that contains 'After Dead' should be rejected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'After Dead - Charlaine Harris.epub'), 'w') as f:
+                f.write('x')
+            assert not postprocess.filename_matches_book(tmpdir, 'Dead Ever After')
+
+    def test_no_book_files_returns_true(self, postprocess_config):
+        """If no book files exist, defer to downstream handlers (return True)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'readme.txt'), 'w') as f:
+                f.write('x')
+            assert postprocess.filename_matches_book(tmpdir, 'Whatever')
+
+    def test_nonexistent_path_returns_true(self, postprocess_config):
+        """Non-existent path: defer (don't break callers)."""
+        assert postprocess.filename_matches_book(
+            '/definitely/does/not/exist', 'Some Book')
+
+    def test_empty_bookname_returns_true(self, postprocess_config):
+        """No bookname to compare against: defer."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'random.epub'), 'w') as f:
+                f.write('x')
+            assert postprocess.filename_matches_book(tmpdir, '')
+
+
+class TestFailTitleMismatch:
+    """Tests for fail_title_mismatch() — handles wrong-book-in-folder cases."""
+
+    @pytest.fixture
+    def mock_book(self):
+        return {
+            'NZBurl': 'http://example.com/dead-ever-after.nzb',
+            'NZBtitle': 'Charlaine Harris Dead Ever After',
+            'NZBprov': 'TestProvider',
+            'BookID': 'book-dea-001',
+            'Source': 'SABNZBD',
+            'DownloadID': 'sab-dea',
+            'AuxInfo': 'eBook',
+        }
+
+    def test_returns_error_message(self, temp_db, mock_book, postprocess_config):
+        db_path, conn = temp_db
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS wanted (
+                NZBurl TEXT PRIMARY KEY, Status TEXT, DLResult TEXT
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO wanted (NZBurl, Status) VALUES (?, ?)",
+            (mock_book['NZBurl'], 'Snatched')
+        )
+        conn.commit()
+
+        with patch.object(postprocess, 'delete_task', return_value=True):
+            result = postprocess.fail_title_mismatch(
+                mock_book, 'eBook', '/tmp/nonexistent',
+                'Dead Ever After', ['After Dead - Charlaine Harris.epub'])
+
+        assert 'Title mismatch' in result
+        assert 'Dead Ever After' in result
+        assert 'After Dead' in result
+
+    def test_marks_snatch_failed(self, temp_db, mock_book, postprocess_config):
+        db_path, conn = temp_db
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS wanted (
+                NZBurl TEXT PRIMARY KEY, Status TEXT, DLResult TEXT
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO wanted (NZBurl, Status) VALUES (?, ?)",
+            (mock_book['NZBurl'], 'Snatched')
+        )
+        conn.commit()
+
+        with patch.object(postprocess, 'delete_task', return_value=True):
+            postprocess.fail_title_mismatch(
+                mock_book, 'eBook', '/tmp/nonexistent',
+                'Dead Ever After', ['After Dead - Charlaine Harris.epub'])
+
+        row = conn.execute(
+            "SELECT Status, DLResult FROM wanted WHERE NZBurl=?",
+            (mock_book['NZBurl'],)
+        ).fetchone()
+        assert row[0] == 'Failed'
+        assert 'Title mismatch' in row[1]
+
+    def test_resets_book_status_to_wanted(self, temp_db, mock_book, postprocess_config):
+        db_path, conn = temp_db
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS books (
+                BookID TEXT PRIMARY KEY, status TEXT, audiostatus TEXT
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO books (BookID, status) VALUES (?, ?)",
+            (mock_book['BookID'], 'Snatched')
+        )
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS wanted (
+                NZBurl TEXT PRIMARY KEY, Status TEXT, DLResult TEXT
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO wanted (NZBurl, Status) VALUES (?, ?)",
+            (mock_book['NZBurl'], 'Snatched')
+        )
+        conn.commit()
+
+        with patch.object(postprocess, 'delete_task', return_value=True):
+            postprocess.fail_title_mismatch(
+                mock_book, 'eBook', '/tmp/nonexistent',
+                'Dead Ever After', ['After Dead.epub'])
+
+        row = conn.execute(
+            "SELECT status FROM books WHERE BookID=?",
+            (mock_book['BookID'],)
+        ).fetchone()
+        assert row[0] == 'Wanted'
+
+    def test_blacklists_when_enabled(self, temp_db, mock_book, postprocess_config):
+        bookbagofholding.CONFIG['BLACKLIST_FAILED'] = True
+        db_path, conn = temp_db
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS blacklist (
+                NZBurl TEXT PRIMARY KEY, NZBtitle TEXT, NZBprov TEXT,
+                BookID TEXT, AuxInfo TEXT, DateAdded TEXT, Reason TEXT
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS wanted (
+                NZBurl TEXT PRIMARY KEY, Status TEXT, DLResult TEXT
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO wanted (NZBurl, Status) VALUES (?, ?)",
+            (mock_book['NZBurl'], 'Snatched')
+        )
+        conn.commit()
+
+        with patch.object(postprocess, 'delete_task', return_value=True):
+            postprocess.fail_title_mismatch(
+                mock_book, 'eBook', '/tmp/nonexistent',
+                'Dead Ever After', ['After Dead.epub'])
+
+        row = conn.execute(
+            "SELECT Reason FROM blacklist WHERE NZBurl=?",
+            (mock_book['NZBurl'],)
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 'TitleMismatch'
+
+    def test_cleans_up_folder_via_move(self, temp_db, mock_book, postprocess_config):
+        """When DESTINATION_COPY is True, the folder should be moved to .fail
+        and not left behind as a duplicate (this is the safe_move bug surface)."""
+        db_path, conn = temp_db
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS wanted (
+                NZBurl TEXT PRIMARY KEY, Status TEXT, DLResult TEXT
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO wanted (NZBurl, Status) VALUES (?, ?)",
+            (mock_book['NZBurl'], 'Snatched')
+        )
+        conn.commit()
+
+        bookbagofholding.CONFIG['DESTINATION_COPY'] = True
+        test_dir = tempfile.mkdtemp()
+        with open(os.path.join(test_dir, 'After Dead.epub'), 'w') as f:
+            f.write('x')
+        fail_path = test_dir + '.fail'
+        try:
+            with patch.object(postprocess, 'delete_task', return_value=True):
+                postprocess.fail_title_mismatch(
+                    mock_book, 'eBook', test_dir,
+                    'Dead Ever After', ['After Dead.epub'])
+            assert not os.path.exists(test_dir)
+            assert os.path.isdir(fail_path)
+        finally:
+            if os.path.exists(test_dir):
+                shutil.rmtree(test_dir)
+            if os.path.exists(fail_path):
+                shutil.rmtree(fail_path)
