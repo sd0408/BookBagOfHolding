@@ -290,6 +290,9 @@
         <span style="font-weight: 500;">Show all results</span>
         <span style="color: var(--ll-text-muted); font-size: 0.875rem;">(ignore category filtering - shows both eBook and AudioBook results)</span>
     </label>
+    <div id="fallbackNotice" style="display: none; margin-top: 0.75rem; padding: 0.5rem 0.75rem; background: var(--ll-warning-bg, #fff8e1); border-left: 3px solid var(--ll-warning, #f59e0b); border-radius: var(--ll-radius-sm); font-size: 0.875rem;">
+        No results matched the selected category, so results below were fetched without the category filter (the indexer may have miscategorised the release).
+    </div>
 </div>
 
 <!-- Search Progress -->
@@ -421,6 +424,10 @@
 
                 if (response.success) {
                     allResults = response.results || [];
+                    var fallbackNotice = document.getElementById('fallbackNotice');
+                    if (fallbackNotice) {
+                        fallbackNotice.style.display = response.used_fallback ? 'block' : 'none';
+                    }
                     renderResults();
                 } else {
                     window.llToast.show('Error: ' + (response.error || 'Unknown error'), 'error');

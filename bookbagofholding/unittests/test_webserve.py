@@ -1033,3 +1033,159 @@ class TestWebInterfaceProfile:
         with pytest.raises(cherrypy.HTTPRedirect) as exc_info:
             wi.profile()
         assert 'login' in exc_info.value.urls[0]
+
+
+# ============================================================================
+# Test Interactive Search Handler (category-fallback behavior)
+# ============================================================================
+
+@pytest.mark.web
+class TestGetInteractiveSearchResults:
+    """Tests for getInteractiveSearchResults — verifies the auto-fallback
+    behavior when a cat-filtered search returns zero results."""
+
+    def _seed_book(self, db, bookid='book-1', author='Test Author', title='Test Book'):
+        db.action(
+            "INSERT INTO authors (AuthorID, AuthorName, AuthorImg, Status, HaveBooks, UnignoredBooks,"
+            " LastBook, LastDate, LastBookID, AuthorLink, LastLink)"
+            " VALUES (?, ?, '', 'Active', 0, 0, '', '', '', '', '')",
+            ['author-1', author]
+        )
+        db.action(
+            "INSERT INTO books (BookID, AuthorID, BookName, Status) VALUES (?, ?, ?, 'Wanted')",
+            [bookid, 'author-1', title]
+        )
+
+    @patch('cherrypy.request')
+    @patch('cherrypy.response')
+    @patch('bookbagofholding.webServe.searchItem')
+    def test_falls_back_to_general_when_cat_returns_zero(
+            self, mock_search, mock_response, mock_request, api_config, temp_db):
+        """When cat='book' returns nothing, the handler should re-call with cat='general'
+        and return its results, marked with used_fallback=True."""
+        from bookbagofholding.webServe import WebInterface
+
+        mock_request.cookie = {}
+        db = DBConnection()
+        self._seed_book(db)
+
+        # First call returns nothing, second call (general) returns one result
+        mock_search.side_effect = [
+            [],
+            [{'score': 90, 'title': 'Test Book Edition', 'provider': 'P1',
+              'size': '1000000', 'date': 'Fri, 01 Jan 2026 00:00:00 +0000',
+              'url': 'http%3A%2F%2Fexample.com%2Fa', 'mode': 'nzb'}],
+        ]
+
+        wi = WebInterface()
+        result = wi.getInteractiveSearchResults(bookid='book-1', library='eBook', showall='0')
+
+        assert result['success'] is True
+        assert result['used_fallback'] is True
+        assert result['count'] == 1
+        # Two calls: first with cat='book', second with cat='general'
+        assert mock_search.call_count == 2
+        first_call = mock_search.call_args_list[0]
+        second_call = mock_search.call_args_list[1]
+        assert first_call[0][2] == 'book'
+        assert second_call[0][2] == 'general'
+
+    @patch('cherrypy.request')
+    @patch('cherrypy.response')
+    @patch('bookbagofholding.webServe.searchItem')
+    def test_no_fallback_when_initial_results_nonempty(
+            self, mock_search, mock_response, mock_request, api_config, temp_db):
+        """When the cat-filtered search already has results, no fallback call should fire."""
+        from bookbagofholding.webServe import WebInterface
+
+        mock_request.cookie = {}
+        db = DBConnection()
+        self._seed_book(db)
+
+        mock_search.return_value = [
+            {'score': 85, 'title': 'Test Book', 'provider': 'P1',
+             'size': '500000', 'date': 'Fri, 01 Jan 2026 00:00:00 +0000',
+             'url': 'http%3A%2F%2Fexample.com%2Fb', 'mode': 'nzb'}
+        ]
+
+        wi = WebInterface()
+        result = wi.getInteractiveSearchResults(bookid='book-1', library='eBook', showall='0')
+
+        assert result['success'] is True
+        assert result['used_fallback'] is False
+        assert result['count'] == 1
+        # Only the initial call — no fallback re-run
+        assert mock_search.call_count == 1
+
+    @patch('cherrypy.request')
+    @patch('cherrypy.response')
+    @patch('bookbagofholding.webServe.searchItem')
+    def test_no_fallback_when_showall_already_set(
+            self, mock_search, mock_response, mock_request, api_config, temp_db):
+        """showall=1 already uses cat='general', so falling back would just repeat the same call."""
+        from bookbagofholding.webServe import WebInterface
+
+        mock_request.cookie = {}
+        db = DBConnection()
+        self._seed_book(db)
+
+        mock_search.return_value = []  # zero results even from general
+
+        wi = WebInterface()
+        result = wi.getInteractiveSearchResults(bookid='book-1', library='eBook', showall='1')
+
+        assert result['success'] is True
+        assert result['used_fallback'] is False
+        assert result['count'] == 0
+        assert mock_search.call_count == 1
+        assert mock_search.call_args_list[0][0][2] == 'general'
+
+    @patch('cherrypy.request')
+    @patch('cherrypy.response')
+    @patch('bookbagofholding.webServe.searchItem')
+    def test_used_fallback_false_when_fallback_also_empty(
+            self, mock_search, mock_response, mock_request, api_config, temp_db):
+        """If both the initial and the fallback search return nothing, used_fallback stays False
+        (no point telling the UI "fallback happened" when there was nothing to surface)."""
+        from bookbagofholding.webServe import WebInterface
+
+        mock_request.cookie = {}
+        db = DBConnection()
+        self._seed_book(db)
+
+        mock_search.side_effect = [[], []]
+
+        wi = WebInterface()
+        result = wi.getInteractiveSearchResults(bookid='book-1', library='eBook', showall='0')
+
+        assert result['success'] is True
+        assert result['used_fallback'] is False
+        assert result['count'] == 0
+        assert mock_search.call_count == 2
+
+    @patch('cherrypy.request')
+    @patch('cherrypy.response')
+    @patch('bookbagofholding.webServe.searchItem')
+    def test_audiobook_library_falls_back_from_audio(
+            self, mock_search, mock_response, mock_request, api_config, temp_db):
+        """AudioBook searches should fall back from cat='audio' to cat='general'."""
+        from bookbagofholding.webServe import WebInterface
+
+        mock_request.cookie = {}
+        db = DBConnection()
+        self._seed_book(db)
+
+        mock_search.side_effect = [
+            [],
+            [{'score': 75, 'title': 'Test Book (Unabridged)', 'provider': 'P1',
+              'size': '50000000', 'date': 'Fri, 01 Jan 2026 00:00:00 +0000',
+              'url': 'http%3A%2F%2Fexample.com%2Fc', 'mode': 'nzb'}],
+        ]
+
+        wi = WebInterface()
+        result = wi.getInteractiveSearchResults(bookid='book-1', library='AudioBook', showall='0')
+
+        assert result['success'] is True
+        assert result['used_fallback'] is True
+        assert mock_search.call_args_list[0][0][2] == 'audio'
+        assert mock_search.call_args_list[1][0][2] == 'general'

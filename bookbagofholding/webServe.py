@@ -1871,7 +1871,20 @@ If you did not request this reset, you can ignore this email.
             # Use min_score=0 to show all results for interactive search (user decides)
             results = searchItem(searchterm, bookid, cat, min_score=0)
 
-            logger.debug('Interactive search found %d results' % len(results))
+            # Auto-fallback: if the cat-filtered search returned nothing, retry without
+            # the category filter. Indexers (especially Prowlarr-fronted ones) frequently
+            # mis-categorise releases — a book ends up under "audiobook" or just "books
+            # general" and the strict cat filter drops it. Falling back to general matches
+            # what the manual "Show all results" checkbox does, but does it automatically
+            # so users don't have to know about the workaround.
+            used_fallback = False
+            if not results and cat != 'general' and showall != '1':
+                logger.debug('Interactive search returned 0 results with cat=%s; falling back to general' % cat)
+                results = searchItem(searchterm, bookid, 'general', min_score=0)
+                used_fallback = bool(results)
+
+            logger.debug('Interactive search found %d results%s' %
+                         (len(results), ' (via general-search fallback)' if used_fallback else ''))
 
             # Check blacklist status for each result
             for result in results:
@@ -1913,7 +1926,8 @@ If you did not request this reset, you can ignore this email.
                 'count': len(results),
                 'bookid': bookid,
                 'library': library,
-                'searchterm': searchterm
+                'searchterm': searchterm,
+                'used_fallback': used_fallback,
             }
         except Exception as e:
             logger.error('Interactive search error: %s' % traceback.format_exc())
