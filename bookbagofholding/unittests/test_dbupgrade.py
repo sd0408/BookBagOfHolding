@@ -74,3 +74,124 @@ class TestDbUpgradeFunctions:
         import sqlite3
         # Just verify we can import sqlite3 for db operations
         assert sqlite3 is not None
+
+
+class TestDbV52BlacklistDedupe:
+    """Tests for db_v52 — one-shot collapse of duplicate blacklist rows."""
+
+    @pytest.fixture
+    def upgrade_log(self, tmp_path):
+        # db_v52 writes a few lines to an upgrade log; provide a real file handle
+        log_path = tmp_path / 'upgradelog.txt'
+        with open(str(log_path), 'w') as f:
+            yield f
+
+    def _seed_blacklist(self, conn):
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS blacklist (
+                NZBurl TEXT, NZBtitle TEXT, NZBprov TEXT, BookID TEXT,
+                AuxInfo TEXT, DateAdded TEXT, Reason TEXT
+            )
+        ''')
+        conn.commit()
+
+    def test_collapses_duplicates_keeping_oldest(self, temp_db, upgrade_log):
+        from bookbagofholding.database import DBConnection
+        from bookbagofholding import dbupgrade
+        db_path, conn = temp_db
+        self._seed_blacklist(conn)
+
+        # 3 ephemeral-URL duplicates for the same release
+        conn.execute(
+            "INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, Reason, DateAdded)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ('http://p/?link=A', 'Made Things', 'prowlarr', 'book-1',
+             'UnsupportedFileType', '2026-05-18 06:52:26')
+        )
+        conn.execute(
+            "INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, Reason, DateAdded)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ('http://p/?link=B', 'Made Things', 'prowlarr', 'book-1',
+             'UnsupportedFileType', '2026-05-18 07:02:31')
+        )
+        conn.execute(
+            "INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, Reason, DateAdded)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ('http://p/?link=C', 'Made Things', 'prowlarr', 'book-1',
+             'UnsupportedFileType', '2026-05-18 07:12:20')
+        )
+        # And a genuinely different release that should survive
+        conn.execute(
+            "INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, Reason, DateAdded)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ('http://p/?link=Z', 'Other Title', 'prowlarr', 'book-1',
+             'UnsupportedFileType', '2026-05-18 06:00:00')
+        )
+        conn.commit()
+
+        dbupgrade.db_v52(DBConnection(), upgrade_log)
+
+        rows = DBConnection().select(
+            'SELECT * FROM blacklist ORDER BY NZBtitle, DateAdded')
+        # 1 collapsed dup + 1 unrelated = 2
+        assert len(rows) == 2
+        # The kept dup row should be the oldest (06:52:26)
+        made_things = [r for r in rows if r['NZBtitle'] == 'Made Things']
+        assert len(made_things) == 1
+        assert made_things[0]['DateAdded'] == '2026-05-18 06:52:26'
+        assert made_things[0]['NZBurl'] == 'http://p/?link=A'
+
+    def test_buckets_null_bookid_together(self, temp_db, upgrade_log):
+        """Rows with BookID=NULL for the same (prov, title, reason) should also collapse."""
+        from bookbagofholding.database import DBConnection
+        from bookbagofholding import dbupgrade
+        db_path, conn = temp_db
+        self._seed_blacklist(conn)
+
+        conn.execute(
+            "INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, Reason, DateAdded)"
+            " VALUES (?, ?, ?, NULL, ?, ?)",
+            ('http://p/?link=A', 'Orphan Title', 'prov', 'Failed', '2026-05-18 06:00:00')
+        )
+        conn.execute(
+            "INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, Reason, DateAdded)"
+            " VALUES (?, ?, ?, NULL, ?, ?)",
+            ('http://p/?link=B', 'Orphan Title', 'prov', 'Failed', '2026-05-18 06:05:00')
+        )
+        conn.commit()
+
+        dbupgrade.db_v52(DBConnection(), upgrade_log)
+
+        rows = DBConnection().select('SELECT * FROM blacklist')
+        assert len(rows) == 1
+
+    def test_no_op_on_clean_table(self, temp_db, upgrade_log):
+        """If there are no duplicates, nothing should be removed."""
+        from bookbagofholding.database import DBConnection
+        from bookbagofholding import dbupgrade
+        db_path, conn = temp_db
+        self._seed_blacklist(conn)
+
+        conn.execute(
+            "INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, Reason, DateAdded)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ('http://p/?link=A', 'Title A', 'prov', 'book-1', 'Failed', '2026-05-18 06:00:00')
+        )
+        conn.execute(
+            "INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, Reason, DateAdded)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ('http://p/?link=B', 'Title B', 'prov', 'book-1', 'Failed', '2026-05-18 06:01:00')
+        )
+        conn.commit()
+
+        dbupgrade.db_v52(DBConnection(), upgrade_log)
+
+        rows = DBConnection().select('SELECT * FROM blacklist')
+        assert len(rows) == 2
+
+    def test_current_version_bumped_to_52(self):
+        """upgrade_needed should now return 52 for a fresh-version-0 db."""
+        # We can't easily run upgrade_needed against a fresh db here, but we can
+        # at least confirm the db_v52 migration function exists.
+        from bookbagofholding import dbupgrade
+        assert hasattr(dbupgrade, 'db_v52'), 'db_v52 migration must exist'

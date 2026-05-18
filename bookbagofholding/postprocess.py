@@ -704,8 +704,11 @@ def processDir(reset=False, startdir=None, ignoreclient=False):
                     if book['Source'] == 'SABNZBD':
                         logger.warn("%s unexpected change [%s] to [%s]" % (book['Source'], matchtitle, dlname))
                     logger.debug("%s Changing [%s] to [%s]" % (book['Source'], matchtitle, dlname))
-                    # should we check against reject word list again as the name has changed?
-                    myDB.action('UPDATE wanted SET NZBtitle=? WHERE NZBurl=?', (dlname, book['NZBurl']))
+                    # Use the downloader-reported name for local folder matching only.
+                    # Do NOT overwrite wanted.NZBtitle: doing so loses the original
+                    # provider-side title that future search results will be matched
+                    # against, which broke blocklist title lookups for re-grabs of
+                    # SAB-renamed jobs.
                     matchtitle = dlname
 
                 book_type = bookType(book)

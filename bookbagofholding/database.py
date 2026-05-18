@@ -145,6 +145,17 @@ def add_to_blacklist(nzb_url, nzb_title, nzb_prov, book_id=None, aux_info=None, 
     """
     Add an entry to the blacklist table to prevent re-downloading.
 
+    Dedupes on (NZBprov, NZBtitle, BookID, Reason) rather than NZBurl alone.
+    Indexers like Prowlarr regenerate signed download URLs on every search, so a
+    URL-keyed dedupe would let the same release add a fresh row every cycle —
+    bloating the table indefinitely and never matching subsequent lookups.
+    The (prov, title, bookid, reason) tuple is stable across re-signs, so it
+    collapses the duplicates while still letting genuinely different releases
+    (different title) coexist as separate entries.
+
+    On a duplicate hit we refresh DateAdded and overwrite NZBurl with the latest
+    seen value, so the entry reflects the most recent observation.
+
     Args:
         nzb_url: The download URL
         nzb_title: The title of the download
@@ -156,13 +167,28 @@ def add_to_blacklist(nzb_url, nzb_title, nzb_prov, book_id=None, aux_info=None, 
     from bookbagofholding.formatter import now
 
     myDB = DBConnection()
-    # Check if already blacklisted by URL to avoid duplicates
-    existing = myDB.match('SELECT * FROM blacklist WHERE NZBurl=?', (nzb_url,))
-    if not existing:
+    timestamp = now()
+
+    # Match on stable fields. NULL comparisons in SQL need IS rather than = —
+    # build the predicate so book_id=None matches existing rows where BookID
+    # was inserted as NULL rather than treating the row as missing.
+    existing = myDB.match(
+        'SELECT rowid FROM blacklist WHERE NZBprov=? AND NZBtitle=? AND Reason=? '
+        'AND ((BookID IS NULL AND ? IS NULL) OR BookID=?)',
+        (nzb_prov, nzb_title, reason, book_id, book_id)
+    )
+    if existing:
+        myDB.action(
+            'UPDATE blacklist SET NZBurl=?, AuxInfo=?, DateAdded=? WHERE rowid=?',
+            (nzb_url, aux_info, timestamp, existing['rowid'])
+        )
+        if bookbagofholding.LOGLEVEL & bookbagofholding.log_dlcomms:
+            logger.debug("Refreshed blacklist entry: %s from %s (%s)" % (nzb_title, nzb_prov, reason))
+    else:
         myDB.action(
             'INSERT INTO blacklist (NZBurl, NZBtitle, NZBprov, BookID, AuxInfo, DateAdded, Reason) '
             'VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (nzb_url, nzb_title, nzb_prov, book_id, aux_info, now(), reason)
+            (nzb_url, nzb_title, nzb_prov, book_id, aux_info, timestamp, reason)
         )
         if bookbagofholding.LOGLEVEL & bookbagofholding.log_dlcomms:
             logger.debug("Added to blacklist: %s from %s (%s)" % (nzb_title, nzb_prov, reason))

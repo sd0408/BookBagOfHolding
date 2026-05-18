@@ -555,3 +555,113 @@ class TestDBConnectionEdgeCases:
 
         result = db.match("SELECT BookDesc FROM books WHERE BookID = ?", [sample_book_data['BookID']])
         assert len(result['BookDesc']) == 100000
+
+
+class TestAddToBlacklist:
+    """Tests for add_to_blacklist() — dedupe by (NZBprov, NZBtitle, BookID, Reason)
+    so ephemeral signed URLs (Prowlarr) don't bloat the table with duplicates."""
+
+    @pytest.fixture(autouse=True)
+    def setup_blacklist_table(self, temp_db):
+        db_path, conn = temp_db
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS blacklist (
+                NZBurl TEXT, NZBtitle TEXT, NZBprov TEXT, BookID TEXT,
+                AuxInfo TEXT, DateAdded TEXT, Reason TEXT
+            )
+        ''')
+        conn.commit()
+        return db_path, conn
+
+    def test_first_insert_creates_row(self, temp_db):
+        from bookbagofholding.database import add_to_blacklist, DBConnection
+        add_to_blacklist(
+            'http://prov/?link=ABC', 'Release Title', 'prov-host:9696/api',
+            book_id='book-1', aux_info='eBook', reason='UnsupportedFileType')
+        rows = DBConnection().select('SELECT * FROM blacklist')
+        assert len(rows) == 1
+        assert rows[0]['NZBurl'] == 'http://prov/?link=ABC'
+        assert rows[0]['Reason'] == 'UnsupportedFileType'
+
+    def test_duplicate_by_url_only_does_not_insert_new(self, temp_db):
+        """The original bug: same (prov, title, bookid, reason) with a different URL
+        used to create a fresh row every cycle. Should now collapse into one."""
+        from bookbagofholding.database import add_to_blacklist, DBConnection
+        add_to_blacklist(
+            'http://prov/?link=ABC', 'Release Title', 'prov-host:9696/api',
+            book_id='book-1', aux_info='eBook', reason='UnsupportedFileType')
+        add_to_blacklist(
+            'http://prov/?link=XYZ', 'Release Title', 'prov-host:9696/api',
+            book_id='book-1', aux_info='eBook', reason='UnsupportedFileType')
+        add_to_blacklist(
+            'http://prov/?link=QQQ', 'Release Title', 'prov-host:9696/api',
+            book_id='book-1', aux_info='eBook', reason='UnsupportedFileType')
+
+        rows = DBConnection().select('SELECT * FROM blacklist')
+        assert len(rows) == 1
+        # The latest URL should be retained so the entry reflects the most recent observation.
+        assert rows[0]['NZBurl'] == 'http://prov/?link=QQQ'
+
+    def test_different_title_creates_separate_row(self, temp_db):
+        """Genuinely different releases (different title) should still get separate rows."""
+        from bookbagofholding.database import add_to_blacklist, DBConnection
+        add_to_blacklist(
+            'http://prov/?link=A', 'Release A', 'prov',
+            book_id='book-1', reason='Failed')
+        add_to_blacklist(
+            'http://prov/?link=B', 'Release B', 'prov',
+            book_id='book-1', reason='Failed')
+        rows = DBConnection().select('SELECT * FROM blacklist')
+        assert len(rows) == 2
+
+    def test_different_reason_creates_separate_row(self, temp_db):
+        """Same release, different reason (e.g. Processed vs Failed) should coexist."""
+        from bookbagofholding.database import add_to_blacklist, DBConnection
+        add_to_blacklist(
+            'http://prov/?link=A', 'Title', 'prov',
+            book_id='book-1', reason='Failed')
+        add_to_blacklist(
+            'http://prov/?link=A', 'Title', 'prov',
+            book_id='book-1', reason='Processed')
+        rows = DBConnection().select('SELECT * FROM blacklist')
+        assert len(rows) == 2
+
+    def test_different_bookid_creates_separate_row(self, temp_db):
+        """Same release attached to a different book should not collide."""
+        from bookbagofholding.database import add_to_blacklist, DBConnection
+        add_to_blacklist(
+            'http://prov/?link=A', 'Title', 'prov',
+            book_id='book-1', reason='Failed')
+        add_to_blacklist(
+            'http://prov/?link=B', 'Title', 'prov',
+            book_id='book-2', reason='Failed')
+        rows = DBConnection().select('SELECT * FROM blacklist')
+        assert len(rows) == 2
+
+    def test_null_bookid_dedupes_with_null_bookid(self, temp_db):
+        """Two inserts with BookID=None should be treated as the same group
+        (SQL NULL doesn't compare equal to itself by default — the impl uses IS)."""
+        from bookbagofholding.database import add_to_blacklist, DBConnection
+        add_to_blacklist(
+            'http://prov/?link=A', 'Orphan Title', 'prov',
+            book_id=None, reason='Failed')
+        add_to_blacklist(
+            'http://prov/?link=B', 'Orphan Title', 'prov',
+            book_id=None, reason='Failed')
+        rows = DBConnection().select('SELECT * FROM blacklist')
+        assert len(rows) == 1
+
+    def test_dedupe_refreshes_dateadded(self, temp_db):
+        """A duplicate hit should bump DateAdded so callers see the most recent timestamp."""
+        from bookbagofholding.database import add_to_blacklist, DBConnection
+        import time as t
+        add_to_blacklist(
+            'http://prov/?link=A', 'Title', 'prov',
+            book_id='book-1', reason='Failed')
+        first = DBConnection().match('SELECT DateAdded FROM blacklist')['DateAdded']
+        t.sleep(1.1)  # ensure now() string differs at second resolution
+        add_to_blacklist(
+            'http://prov/?link=B', 'Title', 'prov',
+            book_id='book-1', reason='Failed')
+        second = DBConnection().match('SELECT DateAdded FROM blacklist')['DateAdded']
+        assert second != first

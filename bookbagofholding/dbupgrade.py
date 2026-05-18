@@ -94,8 +94,10 @@ def upgrade_needed():
     # 49 add sessions table for session management
     # 50 migrate existing users to role-based system
     # 51 add PasswordResetToken and PasswordResetExpiry columns for password reset functionality
+    # 52 collapse duplicate blacklist rows that accumulated when Prowlarr-style ephemeral
+    #    NZBurls bypassed the URL-only dedupe in add_to_blacklist
 
-    db_current_version = 51
+    db_current_version = 52
 
     if db_version < db_current_version:
         return db_current_version
@@ -1380,4 +1382,36 @@ def db_v51(myDB, upgradelog):
         myDB.action('ALTER TABLE users ADD COLUMN PasswordResetExpiry TEXT')
 
     upgradelog.write("%s v51: complete\n" % time.ctime())
+
+
+def db_v52(myDB, upgradelog):
+    # Collapse duplicate blacklist rows that accumulated when Prowlarr-style
+    # ephemeral NZBurls bypassed the URL-only dedupe in add_to_blacklist.
+    # We keep the oldest row per (NZBprov, NZBtitle, BookID, Reason) tuple so
+    # the original DateAdded survives, and delete the rest. Null BookIDs are
+    # bucketed together via COALESCE so they dedupe too.
+    bookbagofholding.UPDATE_MSG = 'Deduplicating blacklist entries'
+    upgradelog.write("%s v52: %s\n" % (time.ctime(), bookbagofholding.UPDATE_MSG))
+
+    before = myDB.match('SELECT COUNT(*) AS c FROM blacklist')
+    before_count = before['c'] if before else 0
+
+    # SQLite's rowid is monotonic per row, so MIN(rowid) per group gives the
+    # earliest-inserted row. Delete every row whose rowid isn't the per-group min.
+    myDB.action(
+        'DELETE FROM blacklist WHERE rowid NOT IN ('
+        '  SELECT MIN(rowid) FROM blacklist '
+        '  GROUP BY NZBprov, NZBtitle, COALESCE(BookID, \'\'), Reason'
+        ')'
+    )
+
+    after = myDB.match('SELECT COUNT(*) AS c FROM blacklist')
+    after_count = after['c'] if after else 0
+    removed = before_count - after_count
+
+    msg = 'Removed %d duplicate blacklist row%s (%d -> %d)' % (
+        removed, '' if removed == 1 else 's', before_count, after_count)
+    logger.info(msg)
+    upgradelog.write("%s v52: %s\n" % (time.ctime(), msg))
+    upgradelog.write("%s v52: complete\n" % time.ctime())
 
