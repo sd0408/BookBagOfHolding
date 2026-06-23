@@ -164,10 +164,14 @@ def add_to_blacklist(nzb_url, nzb_title, nzb_prov, book_id=None, aux_info=None, 
         aux_info: Optional auxiliary info (e.g., 'eBook', 'AudioBook')
         reason: Reason for blacklisting (default: 'Processed')
     """
-    from bookbagofholding.formatter import now
+    from bookbagofholding.formatter import now, strip_embedded_url
 
     myDB = DBConnection()
     timestamp = now()
+
+    # Normalize away any embedded (ephemeral-token) download URL so the
+    # (prov, title, bookid, reason) dedupe/match key stays stable across searches.
+    nzb_title = strip_embedded_url(nzb_title)
 
     # Match on stable fields. NULL comparisons in SQL need IS rather than = —
     # build the predicate so book_id=None matches existing rows where BookID

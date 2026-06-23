@@ -21,7 +21,7 @@ from bookbagofholding import logger, database
 from bookbagofholding.common import scheduleJob
 from bookbagofholding.database import add_to_blacklist
 from bookbagofholding.downloadmethods import NZBDownloadMethod, TORDownloadMethod, DirectDownloadMethod
-from bookbagofholding.formatter import unaccented_str, replace_all, getList, now, check_int
+from bookbagofholding.formatter import unaccented_str, replace_all, getList, now, check_int, strip_embedded_url
 from bookbagofholding.providers import get_searchterm
 from fuzzywuzzy import fuzz
 
@@ -94,7 +94,11 @@ def findBestResult(resultlist, book, searchtype, source):
         matches = []
         ignored_messages = []
         for res in resultlist:
-            resultTitle = unaccented_str(replace_all(res[prefix + 'title'], dictrepl)).strip()
+            # Strip any embedded download URL first: some indexers append the
+            # signed (ephemeral-token) URL to the title, which would otherwise
+            # survive cleaning as ever-changing soup and break blacklist matching.
+            cleanTitle = strip_embedded_url(res[prefix + 'title'])
+            resultTitle = unaccented_str(replace_all(cleanTitle, dictrepl)).strip()
             resultTitle = re.sub(r"\s\s+", " ", resultTitle)  # remove extra whitespace
             Author_match = fuzz.token_set_ratio(author, resultTitle)
             Book_match = fuzz.token_set_ratio(title, resultTitle)

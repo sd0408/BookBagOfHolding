@@ -605,6 +605,27 @@ def replace_all(text, dic):
     return text
 
 
+def strip_embedded_url(text):
+    """Remove an embedded download URL from a release title.
+
+    Some indexer endpoints (notably certain Prowlarr categories) append the
+    signed download URL to the release title, e.g.
+        "Serpent & Dove by Shelby Mahurin EPUB - http://prowlarr:.../download?...&link=<token>..."
+    Those URLs carry a per-request token that is regenerated on every search,
+    so leaving them in the title makes the (provider, title) key used for
+    blacklist matching and dedupe unstable: the same release never matches its
+    own blacklist entry and is re-grabbed forever (and a fresh blacklist row is
+    added each cycle). Stripping the URL restores a stable key.
+    """
+    if not text:
+        return text
+    # Drop the URL token (a non-whitespace run beginning with a scheme)...
+    cleaned = re.sub(r'(?:https?://|magnet:)\S+', '', text, flags=re.IGNORECASE)
+    # ...then any separator/whitespace left dangling at the end ("Title - ").
+    cleaned = re.sub(r'\s*[-–—]\s*$', '', cleaned)
+    return cleaned.strip()
+
+
 def dispName(provider):
     provname = ''
     for item in bookbagofholding.NEWZNAB_PROV:

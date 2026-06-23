@@ -147,6 +147,38 @@ class TestReplaceAll:
         assert formatter.replace_all(None, {'a': 'b'}) == ''
 
 
+class TestStripEmbeddedUrl:
+    """Tests for strip_embedded_url() function."""
+
+    def test_strips_appended_download_url(self):
+        """An http download URL appended after ' - ' should be removed."""
+        title = ("Serpent & Dove by Shelby Mahurin EPUB - "
+                 "http://prowlarr:9696/4/download?apikey=abc&link=TOKEN123&file=Serpent")
+        assert formatter.strip_embedded_url(title) == "Serpent & Dove by Shelby Mahurin EPUB"
+
+    def test_same_release_different_token_yields_same_title(self):
+        """Ephemeral tokens differ per search; stripped titles must be equal."""
+        base = "Serpent & Dove by Shelby Mahurin EPUB - http://prowlarr:9696/4/download?link="
+        a = formatter.strip_embedded_url(base + "TOKEN_AAAAA&file=x")
+        b = formatter.strip_embedded_url(base + "TOKEN_BBBBB&file=x")
+        assert a == b == "Serpent & Dove by Shelby Mahurin EPUB"
+
+    def test_strips_magnet_url(self):
+        """Magnet links should also be stripped."""
+        title = "Some Audiobook - magnet:?xt=urn:btih:DEADBEEF&dn=foo"
+        assert formatter.strip_embedded_url(title) == "Some Audiobook"
+
+    def test_leaves_clean_title_untouched(self):
+        """A normal title with no URL should be returned unchanged."""
+        title = "Grady Hendrix How to Sell a Haunted House"
+        assert formatter.strip_embedded_url(title) == title
+
+    def test_handles_empty_and_none(self):
+        """Empty/None inputs should pass through without error."""
+        assert formatter.strip_embedded_url("") == ""
+        assert formatter.strip_embedded_url(None) is None
+
+
 class TestUnaccented:
     """Tests for unaccented() function."""
 
