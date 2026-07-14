@@ -1457,6 +1457,26 @@ class TestFilenameMatchesBook:
                 f.write('x')
             assert postprocess.filename_matches_book(tmpdir, '')
 
+    def test_matches_despite_series_volume_decoration(self, postprocess_config):
+        """Wanted titles carry series/volume decoration that never appears in the
+        filename (e.g. 'Solo (Book #2)'). The correct file must still match;
+        otherwise the snatch is falsely failed and re-grabbed forever. Regression
+        test for the NZBFinder duplicate-download loop."""
+        cases = [
+            ('Vasily Mahanenko - Solo (epub).epub', 'Solo (Book #2)'),
+            ('Vasily Mahanenko - [Dark Paladin 03] - Restart (epub).epub',
+             'Restart (Dark Paladin Book #3)'),
+            ('Vasily Mahanenko - [The Way of the Shaman 02] - '
+             'The Kartoss Gambit (epub).epub',
+             'The Kartoss Gambit (The Way of the Shaman Book #2)'),
+        ]
+        for filename, bookname in cases:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with open(os.path.join(tmpdir, filename), 'w') as f:
+                    f.write('x')
+                assert postprocess.filename_matches_book(tmpdir, bookname), \
+                    'expected %r to match file %r' % (bookname, filename)
+
 
 class TestFailTitleMismatch:
     """Tests for fail_title_mismatch() — handles wrong-book-in-folder cases."""
