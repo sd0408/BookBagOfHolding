@@ -29,8 +29,8 @@ ARG CALIBRE_VERSION=8.16.2
 
 RUN \
   echo "**** install build dependencies ****" && \
-  apt-get update && \
-  apt-get install -y --no-install-recommends \
+  apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update && \
+  apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
     curl \
     jq \
     xz-utils && \
@@ -44,7 +44,7 @@ RUN \
     CALIBRE_ARCH="x86_64"; \
   fi && \
   echo "Architecture: ${CALIBRE_ARCH}" && \
-  curl -fL "https://download.calibre-ebook.com/${CALIBRE_VERSION}/calibre-${CALIBRE_VERSION}-${CALIBRE_ARCH}.txz" -o /tmp/calibre.txz && \
+  curl -fL --retry 5 --retry-delay 5 --retry-connrefused "https://download.calibre-ebook.com/${CALIBRE_VERSION}/calibre-${CALIBRE_VERSION}-${CALIBRE_ARCH}.txz" -o /tmp/calibre.txz && \
   mkdir -p /calibre && \
   tar xJf /tmp/calibre.txz -C /calibre && \
   rm /tmp/calibre.txz
