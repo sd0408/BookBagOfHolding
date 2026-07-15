@@ -17,6 +17,7 @@ import datetime
 import html
 import os
 import platform
+import re
 import shutil
 import tarfile
 import threading
@@ -118,6 +119,18 @@ def filename_matches_book(pp_path, bookname, threshold=None):
     if threshold is None:
         threshold = bookbagofholding.CONFIG.get('MATCH_RATIO', 80)
     target = _normalize_for_match(bookname).lower()
+    # Wanted titles from the books table often carry series/volume decoration that
+    # never appears in the actual filename, e.g. "Solo (Book #2)",
+    # "The Kartoss Gambit (The Way of the Shaman Book #2)", "Restart (Dark Paladin
+    # Book #3)". partial_ratio then scores the correct file far below threshold and
+    # the snatch is falsely failed, causing an endless re-grab loop. Strip trailing
+    # parenthetical/bracketed decoration and standalone "book #n"/"#n" tokens so we
+    # match on the core title. We only trim TRAILING decoration, so genuine content
+    # mismatches ("After Dead" vs "Dead Ever After") are still caught.
+    stripped = re.sub(r'[\(\[][^\(\)\[\]]*[\)\]]\s*$', '', target).strip()
+    stripped = re.sub(r'\b(book\s*)?#?\s*\d+\s*$', '', stripped).strip()
+    if stripped:
+        target = stripped
     if not target:
         return True
     try:
@@ -1976,6 +1989,21 @@ def processDestination(pp_path=None, dest_path=None, authorname=None, bookname=N
             if authorname.endswith('.'):  # calibre replaces trailing dot with underscore eg Jr. becomes Jr_
                 authorname = authorname[:-1] + '_'
             calibre_dir = os.path.join(dest_dir, unaccented_str(authorname.replace('"', '_')), '')
+            if not os.path.isdir(calibre_dir):
+                # calibredb may have created the author dir under a different case or
+                # spacing than LL's stored authorname (e.g. calibre "RinoZ" vs LL
+                # "Rinoz"). An exact, case-sensitive isdir() misses it and the snatch
+                # fails and gets re-grabbed forever. Match the author dir case-insensitively.
+                want = os.path.basename(os.path.dirname(calibre_dir)).lower()
+                try:
+                    for cand in os.listdir(makeBytestr(dest_dir)):
+                        cand = makeUnicode(cand)
+                        if cand.lower() == want and os.path.isdir(os.path.join(dest_dir, cand)):
+                            calibre_dir = os.path.join(dest_dir, cand, '')
+                            logger.debug('Matched calibre author dir case-insensitively: [%s]' % calibre_dir)
+                            break
+                except OSError:
+                    pass
             if os.path.isdir(calibre_dir):  # assumed author directory
                 target_dir = os.path.join(calibre_dir, '%s (%s)' % (unaccented(bookname), calibre_id))
                 logger.debug('Calibre trying directory [%s]' % target_dir)
@@ -1998,6 +2026,15 @@ def processDestination(pp_path=None, dest_path=None, authorname=None, bookname=N
                     if match:
                         return True, match['BookFile']
                     return False, 'Failed to find bookfile for %s in database' % bookid
+            # Author dir still not found. calibredb('add') already ran above, so the
+            # book is in the library even if we can't locate the author folder by name.
+            # Rescan the whole library and fall back to the DB bookfile before failing,
+            # so a name-normalization miss doesn't trigger an endless re-grab loop.
+            _ = LibraryScan(dest_dir, remove=bool(bookbagofholding.CONFIG['FULL_SCAN']))
+            myDB = database.DBConnection()
+            match = myDB.match('SELECT BookFile FROM books WHERE BookID=?', (bookid,))
+            if match and match['BookFile']:
+                return True, match['BookFile']
             return False, "Failed to locate calibre author dir [%s]" % calibre_dir
             # imported = LibraryScan(dest_dir)  # may have to rescan whole library instead
         except Exception as e:
