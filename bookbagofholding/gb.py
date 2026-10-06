@@ -29,6 +29,26 @@ from bookbagofholding.formatter import plural, today, replace_all, unaccented, u
 from fuzzywuzzy import fuzz
 from urllib.parse import quote, quote_plus, urlencode
 
+# Google returns at most 20 items per page whatever maxResults says, so these cap
+# the number of api hits per query rather than the number of results
+GB_PAGE_LIMIT = 15  # pages per query when fetching all books by an author
+GB_SEARCH_PAGE_LIMIT = 5  # pages per query for a search
+
+
+def normalise_author(name):
+    """ Lowercase unaccented name with punctuation as spaces, so "J.K. Rowling" matches "J. K. Rowling" """
+    name = re.sub(r'[^\w\s]', ' ', unaccented_str(name).lower())
+    return ' '.join(name.split())
+
+
+def author_matches(item, authorname):
+    """ True if any of the authors of a GoogleBooks volume is a close match for authorname """
+    wanted = normalise_author(authorname)
+    for author in item.get('volumeInfo', {}).get('authors', []):
+        if fuzz.ratio(normalise_author(author), wanted) >= 90:
+            return True
+    return False
+
 
 class GoogleBooks:
     def __init__(self, name=None):
@@ -44,20 +64,66 @@ class GoogleBooks:
         if bookbagofholding.CONFIG['GB_API']:
             self.params['key'] = bookbagofholding.CONFIG['GB_API']
 
+    def _get_items(self, query, useCache=True, max_pages=GB_PAGE_LIMIT):
+        """ Return (items, api_hits) for up to max_pages of results for an already quoted query.
+            startIndex steps by the number of items actually returned, as google may return
+            fewer than maxResults per page
+        """
+        items = []
+        api_hits = 0
+        startindex = 0
+        for _ in range(max_pages):
+            self.params['startIndex'] = startindex
+            URL = self.url + query + '&' + urlencode(self.params)
+            try:
+                jsonresults, in_cache = gb_json_request(URL, useCache=useCache)
+            except Exception as err:
+                if hasattr(err, 'reason'):
+                    errmsg = err.reason
+                else:
+                    errmsg = str(err)
+                logger.warn('Google Books API Error [%s]: Check your API key or wait a while' % errmsg)
+                break
+            if not jsonresults:
+                break
+            if not in_cache:
+                api_hits += 1
+            logger.debug('Searching url: ' + URL)
+            page = jsonresults.get('items', [])
+            if not page:
+                break
+            items.extend(page)
+            startindex += len(page)
+        return items, api_hits
+
+    def get_author_items(self, authorname, useCache=True):
+        """ Return (items, api_hits) for all GoogleBooks volumes by authorname.
+            Google Books stopped answering inauthor: queries in late September 2026, so search
+            for the name as plain text, both as a phrase and unquoted as neither finds everything,
+            and keep only volumes with a matching author as plain text also finds books about them
+        """
+        name = unaccented_str(authorname)  # google doesnt like accents in author names
+        results = []
+        seen = set()
+        api_hits = 0
+        for query in (quote_plus('"%s"' % name), quote_plus(name)):
+            items, hits = self._get_items(query, useCache=useCache)
+            api_hits += hits
+            for item in items:
+                if item.get('id') not in seen and author_matches(item, authorname):
+                    seen.add(item.get('id'))
+                    results.append(item)
+        return results, api_hits
+
     # noinspection PyBroadException
     def find_results(self, searchterm=None, queue=None):
-        """ GoogleBooks performs much better if we search for author OR title
-            not both at once, so if searchterm is not isbn, two searches needed.
+        """ Search GoogleBooks for an isbn, or as plain text for anything else.
             Bookbag of Holding searches use <ll> to separate title from author in searchterm
             If this token isn't present, it's an isbn or searchterm as supplied by user
         """
         try:
             myDB = database.DBConnection()
             resultlist = []
-            # See if we should check ISBN field, otherwise ignore it
-            api_strings = ['inauthor:', 'intitle:']
-            if is_valid_isbn(searchterm):
-                api_strings = ['isbn:']
 
             api_hits = 0
 
@@ -73,156 +139,121 @@ class GoogleBooks:
             fullterm = searchterm.replace(' <ll> ', ' ')
             logger.debug('Now searching Google Books API with searchterm: %s' % fullterm)
 
-            for api_value in api_strings:
-                set_url = self.url
-                if api_value == "isbn:":
-                    set_url = set_url + quote(api_value + searchterm)
-                elif api_value == 'intitle:':
-                    searchterm = fullterm
-                    if title:  # just search for title
-                        # noinspection PyUnresolvedReferences
-                        title = title.split(' (')[0]  # without any series info
-                        searchterm = title
-                    searchterm = searchterm.replace("'", "").replace('"', '').strip()  # and no quotes
-                    set_url = set_url + quote(api_value + '"' + searchterm + '"')
-                elif api_value == 'inauthor:':
-                    searchterm = fullterm
-                    if authorname:
-                        searchterm = authorname  # just search for author
-                    searchterm = searchterm.strip()
-                    set_url = set_url + quote_plus(api_value + '"' + searchterm + '"')
+            # Google Books stopped answering inauthor: and intitle: queries in late September 2026
+            # (they return no results), so search with plain text and let the fuzzy matching rank
+            # the results. isbn: is broken too, but plain text isbn searches find nothing either,
+            # so keep using it in case Google restores it.
+            if is_valid_isbn(searchterm):
+                api_value = 'isbn:'
+                query = quote(api_value + searchterm)
+            else:
+                api_value = 'text'
+                searchterm = fullterm
+                if title and authorname:
+                    title = title.split(' (')[0]  # without any series info
+                    searchterm = '%s %s' % (title, authorname)
+                searchterm = searchterm.replace('"', '').strip()  # no quotes
+                query = quote_plus(searchterm)
 
-                startindex = 0
-                resultcount = 0
-                ignored = 0
-                number_results = 1
-                total_count = 0
-                no_author_count = 0
-                try:
-                    while startindex < number_results:
+            resultcount = 0
+            items, api_hits = self._get_items(query, max_pages=GB_SEARCH_PAGE_LIMIT)
+            if not items:
+                logger.warn('Found no results for %s with value: %s' % (api_value, searchterm))
+            try:
+                for item in items:
+                    total_count += 1
 
-                        self.params['startIndex'] = startindex
-                        URL = set_url + '&' + urlencode(self.params)
+                    book = bookdict(item)
+                    if not book['author']:
+                        logger.debug('Skipped a result without authorfield.')
+                        no_author_count += 1
+                        continue
 
+                    if not book['name']:
+                        logger.debug('Skipped a result without title.')
+                        continue
+
+                    valid_langs = getList(bookbagofholding.CONFIG['IMP_PREFLANG'])
+                    if "All" not in valid_langs:  # don't care about languages, accept all
                         try:
-                            jsonresults, in_cache = gb_json_request(URL)
-                            if not jsonresults:
-                                number_results = 0
-                            else:
-                                if not in_cache:
-                                    api_hits += 1
-                                number_results = jsonresults['totalItems']
-                                logger.debug('Searching url: ' + URL)
-                            if number_results == 0:
-                                logger.warn('Found no results for %s with value: %s' % (api_value, searchterm))
-                                break
-                            else:
-                                pass
-                        except Exception as err:
-                            if hasattr(err, 'reason'):
-                                errmsg = err.reason
-                            else:
-                                errmsg = str(err)
-                            logger.warn(
-                                'Google Books API Error [%s]: Check your API key or wait a while' % errmsg)
-                            break
-
-                        startindex += 40
-
-                        for item in jsonresults['items']:
-                            total_count += 1
-
-                            book = bookdict(item)
-                            if not book['author']:
-                                logger.debug('Skipped a result without authorfield.')
-                                no_author_count += 1
+                            # skip if language is not in valid list -
+                            booklang = book['lang']
+                            if booklang not in valid_langs:
+                                logger.debug(
+                                    'Skipped %s with language %s' % (book['name'], booklang))
+                                ignored += 1
                                 continue
+                        except KeyError:
+                            ignored += 1
+                            logger.debug('Skipped %s where no language is found' % book['name'])
+                            continue
 
-                            if not book['name']:
-                                logger.debug('Skipped a result without title.')
-                                continue
+                    if authorname:
+                        author_fuzz = fuzz.ratio(book['author'], authorname)
+                    else:
+                        author_fuzz = fuzz.ratio(book['author'], fullterm)
 
-                            valid_langs = getList(bookbagofholding.CONFIG['IMP_PREFLANG'])
-                            if "All" not in valid_langs:  # don't care about languages, accept all
-                                try:
-                                    # skip if language is not in valid list -
-                                    booklang = book['lang']
-                                    if booklang not in valid_langs:
-                                        logger.debug(
-                                            'Skipped %s with language %s' % (book['name'], booklang))
-                                        ignored += 1
-                                        continue
-                                except KeyError:
-                                    ignored += 1
-                                    logger.debug('Skipped %s where no language is found' % book['name'])
-                                    continue
+                    if title:
+                        if title.endswith(')'):
+                            title = title.rsplit('(', 1)[0]
+                        book_fuzz = fuzz.token_set_ratio(book['name'], title)
+                        # lose a point for each extra word in the fuzzy matches so we get the closest match
+                        words = len(getList(book['name']))
+                        words -= len(getList(title))
+                        book_fuzz -= abs(words)
+                    else:
+                        book_fuzz = fuzz.token_set_ratio(book['name'], fullterm)
 
-                            if authorname:
-                                author_fuzz = fuzz.ratio(book['author'], authorname)
-                            else:
-                                author_fuzz = fuzz.ratio(book['author'], fullterm)
+                    isbn_fuzz = 0
+                    if is_valid_isbn(fullterm):
+                        isbn_fuzz = 100
 
-                            if title:
-                                if title.endswith(')'):
-                                    title = title.rsplit('(', 1)[0]
-                                book_fuzz = fuzz.token_set_ratio(book['name'], title)
-                                # lose a point for each extra word in the fuzzy matches so we get the closest match
-                                words = len(getList(book['name']))
-                                words -= len(getList(title))
-                                book_fuzz -= abs(words)
-                            else:
-                                book_fuzz = fuzz.token_set_ratio(book['name'], fullterm)
+                    highest_fuzz = max((author_fuzz + book_fuzz) / 2, isbn_fuzz)
 
-                            isbn_fuzz = 0
-                            if is_valid_isbn(fullterm):
-                                isbn_fuzz = 100
+                    dic = {':': '.', '"': '', '\'': ''}
+                    bookname = replace_all(book['name'], dic)
 
-                            highest_fuzz = max((author_fuzz + book_fuzz) / 2, isbn_fuzz)
+                    bookname = unaccented(bookname)
+                    bookname = bookname.strip()  # strip whitespace
 
-                            dic = {':': '.', '"': '', '\'': ''}
-                            bookname = replace_all(book['name'], dic)
+                    AuthorID = ''
+                    if book['author']:
+                        match = myDB.match(
+                            'SELECT AuthorID FROM authors WHERE AuthorName=?', (book['author'],))
+                        if match:
+                            AuthorID = match['AuthorID']
 
-                            bookname = unaccented(bookname)
-                            bookname = bookname.strip()  # strip whitespace
+                    resultlist.append({
+                        'authorname': book['author'],
+                        'authorid': AuthorID,
+                        'bookid': item['id'],
+                        'bookname': bookname,
+                        'booksub': book['sub'],
+                        'bookisbn': book['isbn'],
+                        'bookpub': book['pub'],
+                        'bookdate': book['date'],
+                        'booklang': book['lang'],
+                        'booklink': book['link'],
+                        'bookrate': float(book['rate']),
+                        'bookrate_count': book['rate_count'],
+                        'bookimg': book['img'],
+                        'bookpages': book['pages'],
+                        'bookgenre': book['genre'],
+                        'bookdesc': book['desc'],
+                        'author_fuzz': author_fuzz,
+                        'book_fuzz': book_fuzz,
+                        'isbn_fuzz': isbn_fuzz,
+                        'highest_fuzz': highest_fuzz,
+                        'num_reviews': book['ratings']
+                    })
 
-                            AuthorID = ''
-                            if book['author']:
-                                match = myDB.match(
-                                    'SELECT AuthorID FROM authors WHERE AuthorName=?', (book['author'],))
-                                if match:
-                                    AuthorID = match['AuthorID']
+                    resultcount += 1
 
-                            resultlist.append({
-                                'authorname': book['author'],
-                                'authorid': AuthorID,
-                                'bookid': item['id'],
-                                'bookname': bookname,
-                                'booksub': book['sub'],
-                                'bookisbn': book['isbn'],
-                                'bookpub': book['pub'],
-                                'bookdate': book['date'],
-                                'booklang': book['lang'],
-                                'booklink': book['link'],
-                                'bookrate': float(book['rate']),
-                                'bookrate_count': book['rate_count'],
-                                'bookimg': book['img'],
-                                'bookpages': book['pages'],
-                                'bookgenre': book['genre'],
-                                'bookdesc': book['desc'],
-                                'author_fuzz': author_fuzz,
-                                'book_fuzz': book_fuzz,
-                                'isbn_fuzz': isbn_fuzz,
-                                'highest_fuzz': highest_fuzz,
-                                'num_reviews': book['ratings']
-                            })
+            except KeyError:
+                pass
 
-                            resultcount += 1
-
-                except KeyError:
-                    break
-
-                logger.debug("Returning %s result%s for (%s) with keyword: %s" %
-                             (resultcount, plural(resultcount), api_value, searchterm))
+            logger.debug("Returning %s result%s for (%s) with keyword: %s" %
+                         (resultcount, plural(resultcount), api_value, searchterm))
 
             logger.debug("Found %s result%s" % (total_count, plural(total_count)))
             logger.debug("Removed %s unwanted language result%s" % (ignored, plural(ignored)))
@@ -239,16 +270,12 @@ class GoogleBooks:
         # noinspection PyBroadException
         try:
             logger.debug('[%s] Now processing books with Google Books API' % authorname)
-            # google doesnt like accents in author names
-            set_url = self.url + quote('inauthor:"%s"' % unaccented_str(authorname))
-
             api_hits = 0
             gr_lang_hits = 0
             lt_lang_hits = 0
             gb_lang_change = 0
             cache_hits = 0
             not_cached = 0
-            startindex = 0
             removedResults = 0
             duplicates = 0
             ignored = 0
@@ -257,7 +284,6 @@ class GoogleBooks:
             locked_count = 0
             book_ignore_count = 0
             total_count = 0
-            number_results = 1
 
             valid_langs = getList(bookbagofholding.CONFIG['IMP_PREFLANG'])
             # Artist is loading
@@ -267,275 +293,252 @@ class GoogleBooks:
             myDB.upsert("authors", newValueDict, controlValueDict)
 
             try:
-                while startindex < number_results:
+                items, api_hits = self.get_author_items(authorname, useCache=not refresh)
+                if not items:
+                    logger.warn('Found no results for %s' % authorname)
+                else:
+                    logger.debug('Found %s result%s for %s' % (len(items), plural(len(items)), authorname))
 
-                    self.params['startIndex'] = startindex
-                    URL = set_url + '&' + urlencode(self.params)
+                for item in items:
 
-                    try:
-                        jsonresults, in_cache = gb_json_request(URL, useCache=not refresh)
-                        if not jsonresults:
-                            number_results = 0
-                        else:
-                            if not in_cache:
-                                api_hits += 1
-                            number_results = jsonresults['totalItems']
-                    except Exception as err:
-                        if hasattr(err, 'reason'):
-                            errmsg = err.reason
-                        else:
-                            errmsg = str(err)
-                        logger.warn('Google Books API Error [%s]: Check your API key or wait a while' % errmsg)
-                        break
+                    total_count += 1
+                    book = bookdict(item)
+                    # skip if no author, no author is no book.
+                    if not book['author']:
+                        logger.debug('Skipped a result without authorfield.')
+                        continue
 
-                    if number_results == 0:
-                        logger.warn('Found no results for %s' % authorname)
-                        break
-                    else:
-                        logger.debug('Found %s result%s for %s' % (number_results, plural(number_results), authorname))
+                    isbnhead = ""
+                    if len(book['isbn']) == 10:
+                        isbnhead = book['isbn'][0:3]
+                    elif len(book['isbn']) == 13:
+                        isbnhead = book['isbn'][3:6]
 
-                    startindex += 40
+                    booklang = book['lang']
+                    # do we care about language?
+                    if "All" not in valid_langs:
+                        if book['isbn']:
+                            # seems google lies to us, sometimes tells us books are in english when they are not
+                            if booklang == "Unknown" or booklang == "en":
+                                googlelang = booklang
+                                match = False
+                                lang = myDB.match('SELECT lang FROM languages where isbn=?', (isbnhead,))
+                                if lang:
+                                    booklang = lang['lang']
+                                    cache_hits += 1
+                                    logger.debug("Found cached language [%s] for [%s]" % (booklang, isbnhead))
+                                    match = True
+                                if not match:  # no match in cache, try lookup dict
+                                    if isbnhead:
+                                        if len(book['isbn']) == 13 and book['isbn'].startswith('979'):
+                                            for lang in bookbagofholding.isbn_979_dict:
+                                                if isbnhead.startswith(lang):
+                                                    booklang = bookbagofholding.isbn_979_dict[lang]
+                                                    logger.debug("ISBN979 returned %s for %s" %
+                                                                 (booklang, isbnhead))
+                                                    match = True
+                                                    break
+                                        elif (len(book['isbn']) == 10) or \
+                                                (len(book['isbn']) == 13 and book['isbn'].startswith('978')):
+                                            for lang in bookbagofholding.isbn_978_dict:
+                                                if isbnhead.startswith(lang):
+                                                    booklang = bookbagofholding.isbn_978_dict[lang]
+                                                    logger.debug("ISBN979 returned %s for %s" %
+                                                                 (booklang, isbnhead))
+                                                    match = True
+                                                    break
+                                        if match:
+                                            controlValueDict = {"isbn": isbnhead}
+                                            newValueDict = {"lang": booklang}
+                                            myDB.upsert("languages", newValueDict, controlValueDict)
 
-                    for item in jsonresults['items']:
+                                if not match:
+                                    booklang = thingLang(book['isbn'])
+                                    lt_lang_hits += 1
+                                    if booklang:
+                                        match = True
+                                        myDB.action('insert into languages values (?, ?)', (isbnhead, booklang))
 
-                        total_count += 1
-                        book = bookdict(item)
-                        # skip if no author, no author is no book.
-                        if not book['author']:
-                            logger.debug('Skipped a result without authorfield.')
+                                if match:
+                                    # We found a better language match
+                                    if googlelang == "en" and booklang not in ["en-US", "en-GB", "eng"]:
+                                        # these are all english, may need to expand this list
+                                        logger.debug("%s Google thinks [%s], we think [%s]" %
+                                                     (book['name'], googlelang, booklang))
+                                        gb_lang_change += 1
+                                else:  # No match anywhere, accept google language
+                                    booklang = googlelang
+
+                        # skip if language is in ignore list
+                        if booklang not in valid_langs:
+                            logger.debug('Skipped [%s] with language %s' % (book['name'], booklang))
+                            ignored += 1
                             continue
 
-                        isbnhead = ""
-                        if len(book['isbn']) == 10:
-                            isbnhead = book['isbn'][0:3]
-                        elif len(book['isbn']) == 13:
-                            isbnhead = book['isbn'][3:6]
+                    ignorable = ['future', 'date', 'isbn']
+                    if bookbagofholding.CONFIG['NO_LANG']:
+                        ignorable.append('lang')
+                    rejected = None
+                    check_status = False
+                    existing_book = None
+                    bookname = book['name']
+                    bookid = item['id']
+                    if not bookname:
+                        logger.debug('Rejecting bookid %s for %s, no bookname' % (bookid, authorname))
+                        rejected = 'name', 'No bookname'
+                    else:
+                        bookname = replace_all(unaccented(bookname), {':': '.', '"': '', '\'': ''}).strip()
+                        if re.match(r'[^\w-]', bookname):  # remove books with bad characters in title
+                            logger.debug("[%s] removed book for bad characters" % bookname)
+                            rejected = 'chars', 'Bad characters in bookname'
 
-                        booklang = book['lang']
-                        # do we care about language?
-                        if "All" not in valid_langs:
-                            if book['isbn']:
-                                # seems google lies to us, sometimes tells us books are in english when they are not
-                                if booklang == "Unknown" or booklang == "en":
-                                    googlelang = booklang
-                                    match = False
-                                    lang = myDB.match('SELECT lang FROM languages where isbn=?', (isbnhead,))
-                                    if lang:
-                                        booklang = lang['lang']
-                                        cache_hits += 1
-                                        logger.debug("Found cached language [%s] for [%s]" % (booklang, isbnhead))
-                                        match = True
-                                    if not match:  # no match in cache, try lookup dict
-                                        if isbnhead:
-                                            if len(book['isbn']) == 13 and book['isbn'].startswith('979'):
-                                                for lang in bookbagofholding.isbn_979_dict:
-                                                    if isbnhead.startswith(lang):
-                                                        booklang = bookbagofholding.isbn_979_dict[lang]
-                                                        logger.debug("ISBN979 returned %s for %s" %
-                                                                     (booklang, isbnhead))
-                                                        match = True
-                                                        break
-                                            elif (len(book['isbn']) == 10) or \
-                                                    (len(book['isbn']) == 13 and book['isbn'].startswith('978')):
-                                                for lang in bookbagofholding.isbn_978_dict:
-                                                    if isbnhead.startswith(lang):
-                                                        booklang = bookbagofholding.isbn_978_dict[lang]
-                                                        logger.debug("ISBN979 returned %s for %s" %
-                                                                     (booklang, isbnhead))
-                                                        match = True
-                                                        break
-                                            if match:
-                                                controlValueDict = {"isbn": isbnhead}
-                                                newValueDict = {"lang": booklang}
-                                                myDB.upsert("languages", newValueDict, controlValueDict)
+                    if not rejected and bookbagofholding.CONFIG['NO_FUTURE']:
+                        # googlebooks sometimes gives yyyy, sometimes yyyy-mm, sometimes yyyy-mm-dd
+                        if book['date'] > today()[:len(book['date'])]:
+                            logger.debug('Rejecting %s, future publication date %s' % (bookname, book['date']))
+                            rejected = 'future', 'Future publication date [%s]' % book['date']
 
-                                    if not match:
-                                        booklang = thingLang(book['isbn'])
-                                        lt_lang_hits += 1
-                                        if booklang:
-                                            match = True
-                                            myDB.action('insert into languages values (?, ?)', (isbnhead, booklang))
+                    if not rejected and bookbagofholding.CONFIG['NO_PUBDATE']:
+                        if not book['date']:
+                            logger.debug('Rejecting %s, no publication date' % bookname)
+                            rejected = 'date', 'No publication date'
 
-                                    if match:
-                                        # We found a better language match
-                                        if googlelang == "en" and booklang not in ["en-US", "en-GB", "eng"]:
-                                            # these are all english, may need to expand this list
-                                            logger.debug("%s Google thinks [%s], we think [%s]" %
-                                                         (book['name'], googlelang, booklang))
-                                            gb_lang_change += 1
-                                    else:  # No match anywhere, accept google language
-                                        booklang = googlelang
+                    if not rejected and bookbagofholding.CONFIG['NO_ISBN']:
+                        if not isbnhead:
+                            logger.debug('Rejecting %s, no isbn' % bookname)
+                            rejected = 'isbn', 'No ISBN'
 
-                            # skip if language is in ignore list
-                            if booklang not in valid_langs:
-                                logger.debug('Skipped [%s] with language %s' % (book['name'], booklang))
-                                ignored += 1
-                                continue
+                    if not rejected:
+                        cmd = 'SELECT BookID FROM books,authors WHERE books.AuthorID = authors.AuthorID'
+                        cmd += ' and BookName=? COLLATE NOCASE and AuthorName=? COLLATE NOCASE'
+                        match = myDB.match(cmd, (bookname, authorname))
+                        if match:
+                            if match['BookID'] != bookid:  # we have a different book with this author/title already
+                                logger.debug('Rejecting bookid %s for [%s][%s] already got %s' %
+                                             (match['BookID'], authorname, bookname, bookid))
+                                rejected = 'bookid', 'Got under different bookid %s' % bookid
+                                duplicates += 1
 
-                        ignorable = ['future', 'date', 'isbn']
-                        if bookbagofholding.CONFIG['NO_LANG']:
-                            ignorable.append('lang')
-                        rejected = None
-                        check_status = False
-                        existing_book = None
-                        bookname = book['name']
-                        bookid = item['id']
-                        if not bookname:
-                            logger.debug('Rejecting bookid %s for %s, no bookname' % (bookid, authorname))
-                            rejected = 'name', 'No bookname'
+                    cmd = 'SELECT AuthorName,BookName,AudioStatus,books.Status FROM books,authors'
+                    cmd += ' WHERE authors.AuthorID = books.AuthorID AND BookID=?'
+                    match = myDB.match(cmd, (bookid,))
+                    if match:  # we have a book with this bookid already
+                        if bookname != match['BookName'] or authorname != match['AuthorName']:
+                            logger.debug('Rejecting bookid %s for [%s][%s] already got bookid for [%s][%s]' %
+                                         (bookid, authorname, bookname, match['AuthorName'], match['BookName']))
                         else:
-                            bookname = replace_all(unaccented(bookname), {':': '.', '"': '', '\'': ''}).strip()
-                            if re.match(r'[^\w-]', bookname):  # remove books with bad characters in title
-                                logger.debug("[%s] removed book for bad characters" % bookname)
-                                rejected = 'chars', 'Bad characters in bookname'
+                            logger.debug('Rejecting bookid %s for [%s][%s] already got this book in database' %
+                                         (bookid, authorname, bookname))
+                            check_status = True
+                        duplicates += 1
+                        rejected = 'got', 'Already got this book in database'
 
-                        if not rejected and bookbagofholding.CONFIG['NO_FUTURE']:
-                            # googlebooks sometimes gives yyyy, sometimes yyyy-mm, sometimes yyyy-mm-dd
-                            if book['date'] > today()[:len(book['date'])]:
-                                logger.debug('Rejecting %s, future publication date %s' % (bookname, book['date']))
-                                rejected = 'future', 'Future publication date [%s]' % book['date']
+                        # Make sure we don't reject books we have got
+                        if match['Status'] in ['Open', 'Have'] or match['AudioStatus'] in ['Open', 'Have']:
+                            rejected = None
 
-                        if not rejected and bookbagofholding.CONFIG['NO_PUBDATE']:
-                            if not book['date']:
-                                logger.debug('Rejecting %s, no publication date' % bookname)
-                                rejected = 'date', 'No publication date'
+                    if rejected and rejected[0] not in ignorable:
+                        removedResults += 1
+                    if check_status or rejected is None or (
+                            bookbagofholding.CONFIG['IMP_IGNORE'] and rejected[0] in ignorable):  # dates, isbn
 
-                        if not rejected and bookbagofholding.CONFIG['NO_ISBN']:
-                            if not isbnhead:
-                                logger.debug('Rejecting %s, no isbn' % bookname)
-                                rejected = 'isbn', 'No ISBN'
-
-                        if not rejected:
-                            cmd = 'SELECT BookID FROM books,authors WHERE books.AuthorID = authors.AuthorID'
-                            cmd += ' and BookName=? COLLATE NOCASE and AuthorName=? COLLATE NOCASE'
-                            match = myDB.match(cmd, (bookname, authorname))
-                            if match:
-                                if match['BookID'] != bookid:  # we have a different book with this author/title already
-                                    logger.debug('Rejecting bookid %s for [%s][%s] already got %s' %
-                                                 (match['BookID'], authorname, bookname, bookid))
-                                    rejected = 'bookid', 'Got under different bookid %s' % bookid
-                                    duplicates += 1
-
-                        cmd = 'SELECT AuthorName,BookName,AudioStatus,books.Status FROM books,authors'
-                        cmd += ' WHERE authors.AuthorID = books.AuthorID AND BookID=?'
-                        match = myDB.match(cmd, (bookid,))
-                        if match:  # we have a book with this bookid already
-                            if bookname != match['BookName'] or authorname != match['AuthorName']:
-                                logger.debug('Rejecting bookid %s for [%s][%s] already got bookid for [%s][%s]' %
-                                             (bookid, authorname, bookname, match['AuthorName'], match['BookName']))
-                            else:
-                                logger.debug('Rejecting bookid %s for [%s][%s] already got this book in database' %
-                                             (bookid, authorname, bookname))
-                                check_status = True
-                            duplicates += 1
-                            rejected = 'got', 'Already got this book in database'
-
-                            # Make sure we don't reject books we have got
-                            if match['Status'] in ['Open', 'Have'] or match['AudioStatus'] in ['Open', 'Have']:
-                                rejected = None
-
-                        if rejected and rejected[0] not in ignorable:
-                            removedResults += 1
-                        if check_status or rejected is None or (
-                                bookbagofholding.CONFIG['IMP_IGNORE'] and rejected[0] in ignorable):  # dates, isbn
-
-                            cmd = 'SELECT Status,AudioStatus,BookFile,AudioFile,Manual,BookAdded,BookName '
-                            cmd += 'FROM books WHERE BookID=?'
-                            existing = myDB.match(cmd, (bookid,))
-                            if existing:
-                                existing_book = True
-                                book_status = existing['Status']
-                                audio_status = existing['AudioStatus']
-                                if bookbagofholding.CONFIG['FOUND_STATUS'] == 'Open':
-                                    if book_status == 'Have' and existing['BookFile']:
-                                        book_status = 'Open'
-                                    if audio_status == 'Have' and existing['AudioFile']:
-                                        audio_status = 'Open'
-                                locked = existing['Manual']
-                                added = existing['BookAdded']
-                                if locked is None:
-                                    locked = False
-                                elif locked.isdigit():
-                                    locked = bool(int(locked))
-                            else:
-                                book_status = bookstatus  # new_book status, or new_author status
-                                audio_status = audiostatus
-                                added = today()
+                        cmd = 'SELECT Status,AudioStatus,BookFile,AudioFile,Manual,BookAdded,BookName '
+                        cmd += 'FROM books WHERE BookID=?'
+                        existing = myDB.match(cmd, (bookid,))
+                        if existing:
+                            existing_book = True
+                            book_status = existing['Status']
+                            audio_status = existing['AudioStatus']
+                            if bookbagofholding.CONFIG['FOUND_STATUS'] == 'Open':
+                                if book_status == 'Have' and existing['BookFile']:
+                                    book_status = 'Open'
+                                if audio_status == 'Have' and existing['AudioFile']:
+                                    audio_status = 'Open'
+                            locked = existing['Manual']
+                            added = existing['BookAdded']
+                            if locked is None:
                                 locked = False
+                            elif locked.isdigit():
+                                locked = bool(int(locked))
+                        else:
+                            book_status = bookstatus  # new_book status, or new_author status
+                            audio_status = audiostatus
+                            added = today()
+                            locked = False
 
-                            if rejected:
-                                reason = rejected[1]
-                                if rejected[0] in ignorable:
-                                    book_status = 'Ignored'
-                                    audio_status = 'Ignored'
-                                    book_ignore_count += 1
-                            else:
-                                reason = ''
+                        if rejected:
+                            reason = rejected[1]
+                            if rejected[0] in ignorable:
+                                book_status = 'Ignored'
+                                audio_status = 'Ignored'
+                                book_ignore_count += 1
+                        else:
+                            reason = ''
 
-                            if locked:
-                                locked_count += 1
-                            else:
-                                controlValueDict = {"BookID": bookid}
-                                newValueDict = {
-                                    "AuthorID": authorid,
-                                    "BookName": bookname,
-                                    "BookSub": book['sub'],
-                                    "BookDesc": book['desc'],
-                                    "BookIsbn": book['isbn'],
-                                    "BookPub": book['pub'],
-                                    "BookGenre": book['genre'],
-                                    "BookImg": book['img'],
-                                    "BookLink": book['link'],
-                                    "BookRate": float(book['rate']),
-                                    "BookPages": book['pages'],
-                                    "BookDate": book['date'],
-                                    "BookLang": booklang,
-                                    "Status": book_status,
-                                    "AudioStatus": audio_status,
-                                    "BookAdded": added,
-                                    "WorkID": '',
-                                    "ScanResult": reason
-                                }
+                        if locked:
+                            locked_count += 1
+                        else:
+                            controlValueDict = {"BookID": bookid}
+                            newValueDict = {
+                                "AuthorID": authorid,
+                                "BookName": bookname,
+                                "BookSub": book['sub'],
+                                "BookDesc": book['desc'],
+                                "BookIsbn": book['isbn'],
+                                "BookPub": book['pub'],
+                                "BookGenre": book['genre'],
+                                "BookImg": book['img'],
+                                "BookLink": book['link'],
+                                "BookRate": float(book['rate']),
+                                "BookPages": book['pages'],
+                                "BookDate": book['date'],
+                                "BookLang": booklang,
+                                "Status": book_status,
+                                "AudioStatus": audio_status,
+                                "BookAdded": added,
+                                "WorkID": '',
+                                "ScanResult": reason
+                            }
 
-                                myDB.upsert("books", newValueDict, controlValueDict)
-                                logger.debug("Book found: " + bookname + " " + book['date'])
-                                if 'nocover' in book['img'] or 'nophoto' in book['img']:
-                                    # try to get a cover from another source
-                                    workcover, source = getBookCover(bookid)
-                                    if workcover:
-                                        logger.debug('Updated cover for %s using %s' % (bookname, source))
-                                        controlValueDict = {"BookID": bookid}
-                                        newValueDict = {"BookImg": workcover}
-                                        myDB.upsert("books", newValueDict, controlValueDict)
-
-                                elif book['img'] and book['img'].startswith('http'):
-                                    link, success, _ = cache_img("book", bookid, book['img'], refresh=refresh)
-                                    if success:
-                                        controlValueDict = {"BookID": bookid}
-                                        newValueDict = {"BookImg": link}
-                                        myDB.upsert("books", newValueDict, controlValueDict)
-                                    else:
-                                        logger.debug('Failed to cache image for %s' % book['img'])
-
-                                new_status = setStatus(bookid, bookstatus)
-
-                                if not new_status == book_status:
-                                    book_status = new_status
-
-                                worklink = getWorkPage(bookid)
-                                if worklink:
+                            myDB.upsert("books", newValueDict, controlValueDict)
+                            logger.debug("Book found: " + bookname + " " + book['date'])
+                            if 'nocover' in book['img'] or 'nophoto' in book['img']:
+                                # try to get a cover from another source
+                                workcover, source = getBookCover(bookid)
+                                if workcover:
+                                    logger.debug('Updated cover for %s using %s' % (bookname, source))
                                     controlValueDict = {"BookID": bookid}
-                                    newValueDict = {"WorkPage": worklink}
+                                    newValueDict = {"BookImg": workcover}
                                     myDB.upsert("books", newValueDict, controlValueDict)
 
-                                if not existing_book:
-                                    logger.debug("[%s] Added book: %s [%s] status %s" %
-                                                 (authorname, bookname, booklang, book_status))
-                                    added_count += 1
+                            elif book['img'] and book['img'].startswith('http'):
+                                link, success, _ = cache_img("book", bookid, book['img'], refresh=refresh)
+                                if success:
+                                    controlValueDict = {"BookID": bookid}
+                                    newValueDict = {"BookImg": link}
+                                    myDB.upsert("books", newValueDict, controlValueDict)
                                 else:
-                                    logger.debug("[%s] Updated book: %s [%s] status %s" %
-                                                 (authorname, bookname, booklang, book_status))
-                                    updated_count += 1
+                                    logger.debug('Failed to cache image for %s' % book['img'])
+
+                            new_status = setStatus(bookid, bookstatus)
+
+                            if not new_status == book_status:
+                                book_status = new_status
+
+                            worklink = getWorkPage(bookid)
+                            if worklink:
+                                controlValueDict = {"BookID": bookid}
+                                newValueDict = {"WorkPage": worklink}
+                                myDB.upsert("books", newValueDict, controlValueDict)
+
+                            if not existing_book:
+                                logger.debug("[%s] Added book: %s [%s] status %s" %
+                                             (authorname, bookname, booklang, book_status))
+                                added_count += 1
+                            else:
+                                logger.debug("[%s] Updated book: %s [%s] status %s" %
+                                             (authorname, bookname, booklang, book_status))
+                                updated_count += 1
             except KeyError:
                 pass
 

@@ -216,6 +216,11 @@ BookBagOfHolding uses multiple sources to gather comprehensive metadata:
 4. Create an API key
 5. Add to Config → API Keys → Google Books API
 
+> **Note:** Since late September 2026 Google Books returns no results for field-restricted
+> queries (`inauthor:`, `intitle:`, `isbn:`), even with a valid key. Author and title lookups
+> now use plain-text searches, filtered by author and ranked by fuzzy match, instead. Searching
+> by ISBN will find nothing until Google restores `isbn:` queries.
+
 #### LibraryThing (Optional)
 1. Get a developer key from [LibraryThing](https://www.librarything.com/services/keys.php)
 2. Add to Config → API Keys → LibraryThing Developer Key
